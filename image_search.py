@@ -16,6 +16,7 @@ DEPT_KEYWORDS = {
     "cse": "Computer Science and Engineering",
     "computer science": "Computer Science and Engineering",
     "ece": "Electronics and Communication Engineering",
+    "ecec": "Electronics and Communication Engineering",   # common typo
     "electronics": "Electronics and Communication Engineering",
     "eee": "Electrical and Electronics Engineering",
     "electrical": "Electrical and Electronics Engineering",
@@ -24,6 +25,10 @@ DEPT_KEYWORDS = {
     "csm": "CSE (Artificial Intelligence & Machine Learning)",
     "ai": "CSE (Artificial Intelligence & Machine Learning)",
     "aiml": "CSE (Artificial Intelligence & Machine Learning)",
+    "artificial intelligence": "CSE (Artificial Intelligence & Machine Learning)",
+    "machine learning": "CSE (Artificial Intelligence & Machine Learning)",
+    "basic sciences": "Basic Sciences and Humanities",
+    "humanities": "Basic Sciences and Humanities",
 }
 
 
@@ -146,10 +151,10 @@ def search_images(query: str, limit: int = 5) -> list[dict]:
         if want_faculty and not want_principal:
             if role == "principal":
                 continue  # principal is not a faculty result
-            if role in ("faculty",):
-                score += 20
+            if role in ("faculty", "department"):
+                score += 20 if role == "faculty" else 10
             else:
-                continue  # strictly exclude non-faculty
+                continue  # strictly exclude non-faculty/dept images
 
         if want_campus and category == "campus":
             score += 20

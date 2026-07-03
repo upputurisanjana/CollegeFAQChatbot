@@ -44,34 +44,66 @@ SCRAPER_CHUNK_SIZE = 1000
 SCRAPER_CHUNK_OVERLAP = 150
 
 EMBED_MODEL = "text-embedding-3-small"   # spec §4 — same model at index + query time
-BATCH_SIZE = 100                          # chunks per embedding API call
+BATCH_SIZE = 500                          # chunks per embedding API call
 
 # Section keywords → normalised section name (for metadata "section" field)
-# Maps breadcrumb / URL path patterns to the 8 spec sections.
-SECTION_MAP = {
-    "about":           "About BVRIT",
-    "principal":       "About BVRIT",
-    "naac":            "About BVRIT",
-    "nba":             "About BVRIT",
-    "department":      "Departments",
-    "cse":             "Departments",
-    "ece":             "Departments",
-    "eee":             "Departments",
-    "/it/":            "Departments",
-    "csm":             "Departments",
-    "ai-ml":           "Departments",
-    "faculty":         "Faculty",
-    "admission":       "Admissions",
-    "intake":          "Admissions",
-    "fee":             "Fee Structure",
-    "placement":       "Placements",
-    "library":         "Campus & Facilities",
-    "hostel":          "Campus & Facilities",
-    "transport":       "Campus & Facilities",
-    "labs":            "Campus & Facilities",
-    "campus":          "Campus & Facilities",
-    "contact":         "Contact",
-}
+# IMPORTANT: evaluated in priority order — most specific patterns first.
+# Each entry is (url_pattern, section_name). First match wins.
+SECTION_RULES = [
+    # Admissions — check before "about" to avoid /admission/about matching About BVRIT
+    ("admission",                   "Admissions"),
+    ("intake",                      "Admissions"),
+    ("eamcet",                      "Admissions"),
+    ("b-category",                  "Admissions"),
+    ("documents-to-submit",         "Admissions"),
+    # Fee structure
+    ("fee",                         "Fee Structure"),
+    # Placements
+    ("placement",                   "Placements"),
+    ("internship",                  "Placements"),
+    ("recruiter",                   "Placements"),
+    # Faculty — individual profile pages
+    ("/dr-",                        "Faculty"),
+    ("/mr-",                        "Faculty"),
+    ("/ms-",                        "Faculty"),
+    ("/mrs-",                       "Faculty"),
+    ("faculty",                     "Faculty"),
+    ("about-hod",                   "Faculty"),
+    # Departments — specific dept paths (before generic "about")
+    ("computer-science",            "Departments"),
+    ("cse-artificial",              "Departments"),
+    ("electronics-and-communication","Departments"),
+    ("electrical-and-electronics",  "Departments"),
+    ("information-technology",      "Departments"),
+    ("basic-sciences",              "Departments"),
+    ("under-graduate",              "Departments"),
+    ("post-graduate",               "Departments"),
+    # Campus & Facilities
+    ("hostel",                      "Campus & Facilities"),
+    ("library",                     "Campus & Facilities"),
+    ("transport",                   "Campus & Facilities"),
+    ("laboratory",                  "Campus & Facilities"),
+    ("/labs",                       "Campus & Facilities"),
+    ("gym",                         "Campus & Facilities"),
+    ("yoga",                        "Campus & Facilities"),
+    ("food",                        "Campus & Facilities"),
+    ("cafeteria",                   "Campus & Facilities"),
+    ("pcs-facilities",              "Campus & Facilities"),
+    ("differentiator",              "Campus & Facilities"),
+    # Contact
+    ("contact",                     "Contact"),
+    # Research
+    ("research",                    "About BVRIT"),
+    ("naac",                        "About BVRIT"),
+    ("nba",                         "About BVRIT"),
+    ("nirf",                        "About BVRIT"),
+    ("committee",                   "About BVRIT"),
+    ("principal",                   "About BVRIT"),
+    ("management",                  "About BVRIT"),
+    ("about-bvrith",                "About BVRIT"),
+    ("organogram",                  "About BVRIT"),
+    ("nisp",                        "About BVRIT"),
+]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -85,13 +117,10 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def infer_section(chunk: dict) -> str:
-    """Infer the spec §3 section from URL / breadcrumb / page_title."""
+    """Infer the spec §3 section from URL only (breadcrumbs contain site nav and are unreliable)."""
     url = (chunk.get("source_url") or "").lower()
-    breadcrumb = " ".join(chunk.get("breadcrumb") or []).lower()
-    title = (chunk.get("page_title") or "").lower()
-    haystack = f"{url} {breadcrumb} {title}"
-    for keyword, section in SECTION_MAP.items():
-        if keyword in haystack:
+    for pattern, section in SECTION_RULES:
+        if pattern in url:
             return section
     return "General"
 

@@ -30,7 +30,6 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import chromadb
-from chromadb.utils import embedding_functions
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -101,6 +100,8 @@ DEPARTMENT ACCURACY:
 When listing faculty for a specific department (e.g. ECE), only include people
 whose CONTEXT explicitly identifies them as belonging to that department.
 Do not include faculty from other departments even if they appear in the retrieved chunks.
+
+OUTCOME-PROMISE RULE:
 Never guarantee an individual outcome (admission, placement, scholarship
 award, exam result). If asked "will I get placed / admitted / a
 scholarship," decline to predict and instead cite the relevant
@@ -332,7 +333,7 @@ def _extract_citations(chunks: list[RetrievedChunk]) -> list[str]:
 _REFUSAL_PATTERNS = [
     r"i don'?t have that information",
     r"not (found|available|present|mentioned) in",
-    r"please contact",
+    r"please contact.*admissions.*authoritative",   # only the full refusal boilerplate
     r"i cannot (predict|guarantee|promise|confirm)",
     r"individual outcome",
     r"not (in|part of) (the|bvrit).*(published|records|corpus)",
@@ -410,10 +411,9 @@ def answer_question(
     history = history or []
 
     # Check if user wants images
-    from image_search import detect_image_request, search_images
+    from image_search import detect_image_request, search_images, _normalize_dept
+    wants_images = detect_image_request(question)
     images = []
-    if detect_image_request(question):
-        images = search_images(question, limit=5)
 
     # 1. Retrieve — use expanded query for embedding search, original for generation
     expanded_q = _expand_query(question)
@@ -423,6 +423,9 @@ def answer_question(
     if any(kw in q_lower for kw in ["faculty", "teacher", "professor", "staff"]) and \
        any(kw in q_lower for kw in ["give", "list", "show", "any", "some", "5", "3", "10"]):
         effective_top_k = max(top_k, 15)
+    # Boost for department listing queries — need all dept overview pages
+    if any(kw in q_lower for kw in ["department", "departments", "branch", "branches", "course", "offered", "programme"]):
+        effective_top_k = max(top_k, 20)
     chunks = retrieve(expanded_q, section_filter, effective_top_k)
     relevant = [c for c in chunks if c.score >= MIN_RELEVANCE_SCORE]
 
@@ -462,6 +465,32 @@ def answer_question(
         )
 
     latency = time.perf_counter() - t0
+
+    # Image search — done AFTER generation so we can match names from the answer
+    if wants_images:
+        dept = _normalize_dept(question)
+        # Extract faculty names mentioned in the answer (Title. Firstname Lastname pattern)
+        name_matches = re.findall(
+            r'\b(?:Dr\.?|Mr\.?|Ms\.?|Mrs\.?|Prof\.?)\s+[A-Z][a-zA-Z .]+(?:[A-Z][a-zA-Z]+)?',
+            answer_text
+        )
+        if name_matches and dept:
+            # Search by each named faculty, deduplicate by url
+            from image_search import search_images as _si
+            seen_urls = set()
+            for name in name_matches:
+                for img in _si(name + ' ' + (dept or ''), limit=2):
+                    url = img.get('url', '')
+                    if url and url not in seen_urls:
+                        images.append(img)
+                        seen_urls.add(url)
+                    if len(images) >= 5:
+                        break
+                if len(images) >= 5:
+                    break
+        # Fallback: generic query search
+        if not images:
+            images = search_images(question, limit=5)
 
     # Strip any LLM-generated image fallback lines when we have real images
     if images:
