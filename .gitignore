@@ -1,0 +1,27 @@
+# Secrets
+.env
+
+# Generated knowledge base (regenerate with bvrith_kb_scraper.py + ingest.py)
+bvrith_knowledge_base/
+chroma_bvrith/
+
+# Logs
+*.log
+scraper_log.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
