@@ -1,112 +1,76 @@
-# BVRIT Hyderabad — Chatbot Knowledge Base Builder
+# BVRIT Hyderabad — FAQ Chatbot
 
-A crawler that walks the **entire** `bvrithyderabad.edu.in` site — every menu
-item, every dropdown sub-link, every department/admission/placement/research
-page, every news post — plus every PDF linked anywhere on the site (NAAC/NBA/
-AICTE approvals, committees, fee details, policies, syllabi, etc.), and turns
-it into a clean, citation-grounded knowledge base your chatbot can retrieve
-from.
+A grounded RAG (Retrieval Augmented Generation) chatbot for BVRIT Hyderabad
+College of Engineering for Women. Answers questions about admissions, fees,
+departments, faculty, placements, campus facilities, and more — using only
+content retrieved from the college's official website.
 
-## Why it won't hallucinate
+## Architecture
 
-- **No rewriting.** Every stored piece of text is copied verbatim from the
-  live page/PDF — the script never summarizes or "improves" wording.
-- **Every fact is traceable.** Every page record, chunk, image entry, and PDF
-  page carries `source_url`, `retrieved_at_utc`, and a `content_hash`. Your
-  chatbot should *always* surface the `source_url` next to its answer.
-- **No invented links.** The crawler only follows `<a href>` targets it finds
-  literally in the HTML — this is how it discovers every dropdown item
-  automatically, since BVRITH's menus are plain server-rendered `<ul><li>`
-  links (not JavaScript-only), so nothing is missed.
-- **Downstream rule of thumb:** if your chatbot's retrieval step finds no
-  relevant chunk for a question, it should say so rather than guess.
+```
+User query → Section filter → Embedding (all-MiniLM-L6-v2)
+    → ChromaDB retrieval (384-dim, cosine)
+    → Context + System prompt → OpenRouter LLM (free tier)
+    → Tool calling (fee/date/percentage calculators)
+    → Governance (audit log, rate limit, content monitor)
+    → Conversation memory (entity extraction)
+    → Answer + Citations + Images
+```
 
-## 1. Setup
+## Quick start
 
 ```bash
 pip install -r requirements.txt
+streamlit run app.py
 ```
 
-## 2. Run the crawl
+Opens at `http://localhost:8501` with three tabs:
+- **Chat** — ask questions, filter by section, select model
+- **Evaluation** — run test suite across 8 dimensions
+- **Admin** — audit log, rate limits, usage stats
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `rag.py` | Core RAG pipeline: retrieval, grounding, generation, tool calling |
+| `app.py` | Streamlit frontend (chat UI, eval dashboard, admin panel) |
+| `tools.py` | Function-calling tools: fee calculator, date checker, percentage calculator |
+| `memory.py` | Conversation memory and entity extraction (name, departments, topics) |
+| `governance.py` | Audit logging, rate limiting, content monitoring, prompt versioning |
+| `eval.py` | 8-dimension evaluation suite with LLM judge |
+| `image_search.py` | Faculty/campus image retrieval from scraped images |
+| `chunk_and_index.py` | Chunk pages + build Chroma vector store |
+| `scrape_site.py` | Crawl bvrithyderabad.edu.in |
+| `config.py` | Shared configuration |
+| `requirements.txt` | Python dependencies |
+
+## Models
+
+Uses **OpenRouter** free tier. Configured models (in `rag.py`):
+
+| Display name | Model ID |
+|---|---|
+| Free Router | `openrouter/free` (auto-selects best available) |
+| Gemma 4 31B | `google/gemma-4-31b-it:free` |
+| Llama 3.3 70B | `meta-llama/llama-3.3-70b-instruct:free` |
+
+Set `OPENROUTER_API_KEY` in `.env` (get one at [openrouter.ai/keys](https://openrouter.ai/keys)).
+
+## Vector store
+
+The ChromaDB vector store (`chroma_db/`) contains ~2100 chunks with 384-dim
+embeddings from `all-MiniLM-L6-v2`. Rebuild it:
 
 ```bash
-python bvrith_kb_scraper.py \
-    --max-pages 1000 \
-    --max-pdfs 300 \
-    --delay 1.0 \
-    --download-images \
-    --download-pdfs \
-    -v
+python chunk_and_index.py
 ```
 
-Run this from a machine/server with real internet access to
-`bvrithyderabad.edu.in` — a polite crawl of the whole site (~a few hundred
-pages + PDFs) typically takes 15–45 minutes with the default 1-second delay.
-Increase `--delay` if you want to be extra gentle on their server, or ask the
-college IT team for permission first — it's good practice even though the
-site's own `robots.txt` is respected automatically.
-
-Useful flags:
-| Flag | Purpose |
-|---|---|
-| `--max-pages` | Safety cap on number of HTML pages crawled |
-| `--max-pdfs` | Safety cap on number of PDFs downloaded & OCR'd |
-| `--delay` | Seconds between requests (politeness / rate-limit) |
-| `--download-images` / `--download-pdfs` | Save the actual binary files, not just metadata/text |
-| `--ignore-robots` | Not recommended — only if you have explicit permission |
-| `-v` | Verbose logging, prints every page as it's scraped |
-
-## 3. Output files (in `bvrith_knowledge_base/`)
-
-| File | Contents |
-|---|---|
-| `pages.jsonl` | One JSON object per crawled page: title, headings, tables, full text, hash |
-| `chunks.jsonl` | ~1000-character overlapping chunks, **this is what you feed to your RAG retriever** |
-| `images_manifest.jsonl` | Every image: `src`, `alt`, `context_heading` (nearest heading), `caption`, page it appeared on |
-| `pdf_documents.jsonl` | Full extracted text of every linked PDF, page-by-page |
-| `crawl_log.csv` | Audit trail — every URL visited, HTTP status, timestamp (use this to double check nothing important 404'd) |
-| `run_summary.json` | Totals: pages/images/PDFs/chunks/errors |
-
-### `chunks.jsonl` schema (what your chatbot will actually query)
-
-```json
-{
-  "chunk_id": "0356a8aad63337a4",
-  "source_url": "https://bvrithyderabad.edu.in/admission/fee-details/",
-  "page_title": "Fee Details – BVRIT HYDERABAD",
-  "breadcrumb": ["Home", "Admissions", "Fee Details"],
-  "chunk_index": 0,
-  "text": "verbatim scraped text ...",
-  "retrieved_at_utc": "2026-07-02T10:15:00+00:00",
-  "pdf_page_number": 3          // only present for chunks sourced from a PDF
-}
-```
-
-## 4. Wiring it into a chatbot (next step, not included here)
-
-This script deliberately stops at "clean, citation-tagged knowledge base" —
-that's the part where hallucination risk is highest if done carelessly.
-For the retrieval layer:
-
-1. Embed each row of `chunks.jsonl` (e.g. with `sentence-transformers` or the
-   Claude/OpenAI embeddings API) and store vectors in something like
-   Chroma/FAISS/Qdrant, keeping `chunk_id`/`source_url` as metadata.
-2. At query time, retrieve top-k chunks, pass them to the LLM as context, and
-   instruct it: *"Only answer using the provided excerpts. Cite the
-   `source_url` for every claim. If the excerpts don't contain the answer,
-   say you don't know and suggest contacting the college."*
-3. Re-run this scraper periodically (e.g. weekly via cron) since the site has
-   a live "Announcements" ticker and news section — compare `content_hash`
-   values to detect what actually changed instead of re-embedding everything.
-
-## 5. Scope note
-
-By default the crawler stays on `bvrithyderabad.edu.in`. It will discover
-links to sister-campus/portal domains (e.g. `bvrithyderabad.ac.in` the
-admissions portal, `vjoc.in`, `bvritnext.com`) but **won't follow them**
-unless you add them to `--allowed-domains`. Add them explicitly if you want
-those in scope too:
+## Evaluation
 
 ```bash
-python bvrith_kb_scraper.py --allowed-domains bvrithyderabad.edu.in bvrithyderabad.ac.in
+python eval.py                     # full suite
+python eval.py --dim 04            # single dimension
+python eval.py --no-ragas          # skip RAGAS metrics
+python eval.py --out report.json   # save JSON report
 ```

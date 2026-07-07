@@ -4,6 +4,11 @@
 # Generated knowledge base (regenerate with bvrith_kb_scraper.py + ingest.py)
 bvrith_knowledge_base/
 chroma_bvrith/
+chroma_db/
+chroma_db_test/
+
+# HandsOn exercise files (reference only, not part of the app)
+HandsOn_FunctionCalling_Questions.md
 
 # Logs
 *.log
