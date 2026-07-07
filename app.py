@@ -1,9 +1,7 @@
 """
-app.py — BVRIT Hyderabad FAQ Chatbot (full Streamlit UI)
-=========================================================
-spec.md §6 — two tabs: Chat + Evaluation Dashboard
+app.py — BVRIT Hyderabad FAQ Chatbot
+=====================================
 Run:  streamlit run app.py
-Requires: ingest.py run first (python ingest.py) to build ./chroma_bvrith
 """
 
 import hashlib
@@ -20,142 +18,301 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ---------------------------------------------------------------------------
-# Constants / config  (spec §6.1)
+# Config
 # ---------------------------------------------------------------------------
 
 SECTIONS = [
     "All Sections",
-    "About BVRIT",
-    "Departments",
-    "Admissions",
-    "Fee Structure",
-    "Placements",
-    "Campus & Facilities",
+    "About BVRITH",
     "Faculty",
-    "Contact",
+    "Placement",
+    "Laboratories",
+    "Sports",
+    "Transportation",
+    "Library",
+    "CSE – AI&ML",
+    "Electronics and Communication Engineering",
+    "Computer Science and Engineering",
+    "Basic Sciences and Humanities",
+    "Electrical and Electronics Engineering",
+    "Information Technology",
+    "Patents",
+    "Entrepreneurship",
 ]
 
-from config import MODEL_MAP
-GENERATION_MODELS = list(MODEL_MAP.keys())
+GENERATION_MODELS = ["DeepSeek R1", "Gemma 3 12B", "Llama 3.1 8B"]
 
 QUICK_PROMPTS = [
     "What departments are offered?",
-    "What is the hostel fee?",
-    "How do I apply for admission?",
     "What is the fee structure?",
+    "How do I apply for admission?",
+    "Who are the ECE faculty?",
 ]
 
-MAX_INPUT_CHARS       = 500   # spec §9.1 — prompt-based DoS guard
-MAX_QUERIES_PER_SESSION = 40  # spec §9.4 — per-session cost cap
-ALLOWED_DOMAIN        = "bvrithyderabad.edu.in"  # spec §9.3 — citation spoofing guard
+MAX_INPUT_CHARS         = 500
+MAX_QUERIES_PER_SESSION = 40
+ALLOWED_DOMAIN          = "bvrithyderabad.edu.in"
 
-from config import KB_DIR, CHROMA_DIR
+KB_DIR       = Path("bvrith_knowledge_base")
 SUMMARY_FILE = KB_DIR / "run_summary.json"
+CHROMA_DIR   = "./chroma_bvrith_v2"
 
 # ---------------------------------------------------------------------------
-# Page config (must be first Streamlit call)
+# Page config — must be first Streamlit call
 # ---------------------------------------------------------------------------
 
 st.set_page_config(
     page_title="BVRIT Hyderabad — FAQ Chatbot",
     page_icon="🎓",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 # ---------------------------------------------------------------------------
-# CSS
+# CSS — hide deploy bar, sidebar toggle, toolbar; clean typography
 # ---------------------------------------------------------------------------
 
 CUSTOM_CSS = """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@500&family=Inter:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@500;600&family=Inter:wght@400;500;600;700&display=swap');
 
-html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-.stApp { background: #faf7f2; }
+/* ── Hide Streamlit chrome ── */
+.stApp > header,
+.stApp [data-testid="stToolbar"],
+[data-testid="stSidebarCollapseButton"],
+[data-testid="collapsedControl"],
+#MainMenu,
+footer { display: none !important; }
 
-/* ── header ── */
-.bvrith-header {
-    display:flex; align-items:baseline; justify-content:space-between;
-    padding-bottom:0.75rem; border-bottom:1px solid #e2dccf; margin-bottom:1.25rem;
-}
-.bvrith-wordmark {
-    font-family:'Source Serif 4',serif; font-size:1.5rem;
-    font-weight:500; color:#4a1b28;
-}
-.bvrith-tagline  { font-size:0.85rem; color:#7a776e; margin-top:2px; }
-.bvrith-status   { font-size:0.75rem; color:#7a776e; white-space:nowrap; }
-.bvrith-status .dot {
-    display:inline-block; width:6px; height:6px; border-radius:50%;
-    background:#4a8f5c; margin-right:6px;
+/* ── Hide sidebar entirely ── */
+section[data-testid="stSidebar"] { display: none !important; }
+
+:root {
+    --bg:           #f6f1e8;
+    --panel:        rgba(255,255,255,0.80);
+    --panel-strong: #ffffff;
+    --ink:          #1d1b16;
+    --muted:        #6f675e;
+    --line:         #ded4c3;
+    --brand:        #5b2333;
+    --brand-2:      #8b5e34;
+    --accent:       #1f6f63;
 }
 
-/* ── chat bubbles ── */
-.user-msg {
-    background:#f1dbe1; color:#4a1b28; border-radius:14px;
-    padding:10px 16px; max-width:72%; margin-left:auto;
-    margin-bottom:4px; font-size:0.92rem;
+html, body, [class*="css"] {
+    font-family: 'Inter', sans-serif;
+    color: var(--ink);
 }
-.assistant-answer {
-    font-size:0.92rem; line-height:1.65; color:#2c2c2a;
-    padding:4px 2px 0 2px;
+
+.stApp {
+    background:
+        radial-gradient(circle at top left,  rgba(91,35,51,0.10),  transparent 24%),
+        radial-gradient(circle at top right, rgba(31,111,99,0.10), transparent 20%),
+        linear-gradient(180deg, #fbf8f2 0%, var(--bg) 100%);
 }
-.citation {
-    border-top:1px solid #e2dccf; margin-top:10px; padding-top:6px;
-    font-size:0.75rem; letter-spacing:0.02em; color:#7a776e;
+
+.block-container {
+    padding-top: 1.2rem;
+    padding-bottom: 2rem;
+    max-width: 1100px;
 }
+
+/* ── Hero banner ── */
+.hero {
+    background: linear-gradient(135deg, rgba(91,35,51,0.98), rgba(139,94,52,0.92));
+    color: white;
+    border-radius: 20px;
+    padding: 1.3rem 1.5rem;
+    box-shadow: 0 14px 36px rgba(41,20,26,0.16);
+    margin-bottom: 1rem;
+    position: relative;
+    overflow: hidden;
+}
+.hero:before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(120deg, rgba(255,255,255,0.11), transparent 45%);
+    pointer-events: none;
+}
+.hero-title {
+    font-family: 'Source Serif 4', serif;
+    font-size: 1.85rem;
+    font-weight: 600;
+    line-height: 1.1;
+    margin: 0;
+}
+.hero-subtitle {
+    margin-top: 0.4rem;
+    color: rgba(255,255,255,0.86);
+    font-size: 0.94rem;
+}
+.hero-pillrow {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+    margin-top: 0.85rem;
+}
+.hero-pill {
+    background: rgba(255,255,255,0.14);
+    border: 1px solid rgba(255,255,255,0.18);
+    color: white;
+    border-radius: 999px;
+    padding: 0.35rem 0.7rem;
+    font-size: 0.78rem;
+}
+.status-dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: #90e1a2;
+    margin-right: 0.4rem;
+    box-shadow: 0 0 0 3px rgba(144,225,162,0.2);
+}
+
+/* ── Chat area ── */
+.chat-wrap {
+    background: rgba(255,255,255,0.55);
+    border: 1px solid rgba(222,212,195,0.9);
+    border-radius: 20px;
+    padding: 1rem;
+    box-shadow: 0 8px 24px rgba(65,45,27,0.05);
+    min-height: 120px;
+}
+.chat-bubble {
+    border: 1px solid rgba(222,212,195,0.9);
+    border-radius: 16px;
+    padding: 0.9rem 1rem;
+    margin-bottom: 0.65rem;
+    background: var(--panel-strong);
+    box-shadow: 0 6px 16px rgba(43,30,18,0.04);
+}
+.chat-bubble.user {
+    background: linear-gradient(180deg, #f7e7eb, #f3d8df);
+    border-color: rgba(91,35,51,0.12);
+    margin-left: 12%;
+}
+.chat-bubble.assistant {
+    background: linear-gradient(180deg, #ffffff, #fffdf9);
+    margin-right: 8%;
+}
+.chat-label {
+    font-size: 0.71rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin-bottom: 0.4rem;
+}
+.chat-text { font-size: 0.95rem; line-height: 1.7; }
+
+/* ── Badges ── */
 .badge {
-    display:inline-block; font-size:0.68rem; font-weight:500;
-    padding:2px 8px; border-radius:10px; margin-left:6px;
-    vertical-align:middle;
+    display: inline-flex;
+    align-items: center;
+    font-size: 0.7rem;
+    font-weight: 700;
+    padding: 0.3rem 0.65rem;
+    border-radius: 999px;
 }
-.badge-green  { background:#d4edda; color:#155724; }
-.badge-red    { background:#f8d7da; color:#721c24; }
-.badge-amber  { background:#fff3cd; color:#856404; }
+.badge-green { background:#d7f1de; color:#165b2c; }
+.badge-red   { background:#f9dbdf; color:#7f1d2d; }
+.badge-amber { background:#fff0c9; color:#8a5a00; }
 
-/* ── sidebar ── */
-section[data-testid="stSidebar"] { background:#f1ebe0; border-right:1px solid #e2dccf; }
-section[data-testid="stSidebar"] h3 { font-size:0.8rem; color:#7a776e; letter-spacing:0.03em; }
+/* ── Citation box ── */
+.citation-box {
+    border: 1px solid var(--line);
+    background: rgba(249,245,238,0.92);
+    border-radius: 12px;
+    padding: 0.75rem 0.9rem;
+}
 
-/* ── eval dashboard ── */
-.dim-card {
-    background:#fff; border:1px solid #e2dccf; border-radius:10px;
-    padding:14px 16px; margin-bottom:10px;
-}
-.dim-title  { font-size:0.9rem; font-weight:600; color:#4a1b28; }
-.dim-counts { font-size:0.78rem; color:#7a776e; margin-top:2px; }
-.fail-card  {
-    background:#fff8f8; border-left:3px solid #c0392b;
-    padding:10px 14px; margin-bottom:8px; border-radius:4px;
-    font-size:0.82rem;
-}
+/* ── Eval summary banner ── */
 .summary-banner {
-    background:#4a1b28; color:#fff; border-radius:10px;
-    padding:16px 22px; margin-bottom:20px;
-    display:flex; gap:32px; align-items:center;
+    background: linear-gradient(135deg, rgba(91,35,51,0.96), rgba(31,111,99,0.94));
+    color: #fff;
+    border-radius: 20px;
+    padding: 1rem 1.1rem;
+    margin-bottom: 1rem;
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 0.65rem;
 }
-.sb-metric { text-align:center; }
-.sb-num    { font-size:1.6rem; font-weight:700; }
-.sb-label  { font-size:0.72rem; opacity:0.75; }
+.sb-metric {
+    background: rgba(255,255,255,0.12);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 14px;
+    padding: 0.7rem 0.5rem;
+    text-align: center;
+}
+.sb-num   { font-size: 1.55rem; font-weight: 800; line-height: 1.1; }
+.sb-label { font-size: 0.7rem;  opacity: 0.84; letter-spacing: 0.07em; }
+
+/* ── Eval dimension cards ── */
+.dim-card {
+    background: rgba(255,255,255,0.78);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 0.9rem 1rem;
+    margin-bottom: 0.6rem;
+}
+.dim-title  { font-size: 0.93rem; font-weight: 700; color: var(--brand); }
+.dim-counts { font-size: 0.78rem; color: var(--muted); margin-top: 0.18rem; }
+
+/* ── Controls strip ── */
+.controls-strip {
+    background: rgba(255,255,255,0.7);
+    border: 1px solid rgba(222,212,195,0.85);
+    border-radius: 16px;
+    padding: 0.75rem 1rem;
+    margin-bottom: 0.85rem;
+    display: flex;
+    gap: 0.75rem;
+    align-items: flex-end;
+    flex-wrap: wrap;
+}
+
+/* ── Buttons ── */
+.stButton button {
+    border-radius: 10px;
+    border: 1px solid rgba(91,35,51,0.15);
+    background: linear-gradient(180deg, #ffffff, #f3ece1);
+    color: var(--brand);
+    font-weight: 600;
+}
+.stButton button:hover {
+    border-color: rgba(91,35,51,0.28);
+    box-shadow: 0 6px 14px rgba(91,35,51,0.08);
+}
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
+
 # ---------------------------------------------------------------------------
-# Security helpers  (spec §9.3)
+# Security helpers
 # ---------------------------------------------------------------------------
 
 def safe(text: str) -> str:
-    """Escape before injecting into unsafe_allow_html blocks."""
     return html.escape(str(text))
 
 
 def citation_trusted(citation: str) -> bool:
-    """Only surface citations pointing at the real source domain."""
     return bool(citation) and ALLOWED_DOMAIN in citation
 
+
+def strip_inline_citations(answer: str) -> str:
+    text = re.sub(r"\s*\[(?:[^\[\]]{2,200}?)\]\s*", " ", answer)
+    text = re.sub(
+        r"\s*[\u2014-]\s*https?://\S+\s*\(?(?:retrieved\s+\d{4}-\d{2}-\d{2}|page\s+\d+)\)?\s*",
+        " ", text, flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
 # ---------------------------------------------------------------------------
-# Knowledge-base metadata helpers
+# KB helpers
 # ---------------------------------------------------------------------------
 
 @st.cache_data(ttl=300)
@@ -170,7 +327,6 @@ def load_run_summary() -> dict:
 
 @st.cache_data(ttl=300)
 def get_chroma_stats() -> dict:
-    """Return chunk count + index status without re-loading on every rerun."""
     try:
         from rag import get_collection_stats
         return get_collection_stats()
@@ -179,19 +335,18 @@ def get_chroma_stats() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Session state init
+# Session state
 # ---------------------------------------------------------------------------
 
 def init_state():
     defaults = {
-        "messages":       [],
-        "pending_prompt": None,
-        "last_latency":   None,
-        "last_chunks":    None,
-        "last_tokens_in": None,
-        "last_tokens_out":None,
-        "eval_report":    None,
-        "eval_running":   False,
+        "messages":        [],
+        "pending_prompt":  None,
+        "last_latency":    None,
+        "last_chunks":     None,
+        "last_tokens_in":  None,
+        "last_tokens_out": None,
+        "eval_report":     None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -212,124 +367,10 @@ if "memory" not in st.session_state:
     st.session_state.memory = ConversationMemory(st.session_state.session_id)
 
 # ---------------------------------------------------------------------------
-# Sidebar  (spec §6.1 — every field)
-# ---------------------------------------------------------------------------
-
-with st.sidebar:
-    st.markdown("### 📚 Knowledge Base")
-
-    summary   = load_run_summary()
-    kb_stats  = get_chroma_stats()
-    chunk_count = kb_stats.get("total_chunks", 0)
-
-    # Index status badge
-    if chunk_count > 0:
-        index_badge = "🟢 LIVE"
-    elif summary:
-        index_badge = "🟡 STALE — run ingest.py"
-    else:
-        index_badge = "🔴 NOT INDEXED — run ingest.py"
-
-    st.markdown(f"**Status:** {index_badge}")
-    st.caption(f"Chunks indexed: **{chunk_count}**")
-    st.caption("Corpus mode: Raw Crawl (Pipeline B) ⚠ content not manually reviewed")
-
-    # Crawl freshness (from run_summary.json)
-    if summary:
-        finished = summary.get("finished_at_utc", "unknown")[:19].replace("T", " ")
-        st.markdown("### 🕐 Crawl Freshness")
-        st.caption(f"Source crawled: {finished} UTC")
-        st.caption(
-            f"Pages: {summary.get('pages_crawled', '?')} · "
-            f"PDFs: {summary.get('pdfs_processed', '?')} · "
-            f"Images: {summary.get('images_found', '?')}"
-        )
-
-    st.divider()
-
-    st.markdown("### ⚙️ Retrieval Settings")
-
-    # Chunk size / overlap — read-only (set at index time)
-    col1, col2 = st.columns(2)
-    col1.metric("Chunk Size", "1000", help="Set at index time — changing requires re-embedding")
-    col2.metric("Overlap", "150", help="Set at index time")
-
-    top_k = st.slider("Top-K Results", min_value=3, max_value=10, value=5)
-
-    section_filter = st.selectbox("Section Filter", SECTIONS, index=0)
-    effective_filter = None if section_filter == "All Sections" else section_filter
-
-    model = st.selectbox("Generation Model", GENERATION_MODELS, index=0)
-
-    st.divider()
-
-    # RAGAS panel (populated after eval run)
-    st.markdown("### 📊 RAGAS Evaluation")
-    report = st.session_state.get("eval_report")
-    if report and report.get("ragas"):
-        r = report["ragas"]
-        metrics = [
-            ("Faithfulness",       r.get("faithfulness")),
-            ("Answer Relevancy",   r.get("answer_relevancy")),
-            ("Context Precision",  r.get("context_precision")),
-            ("Context Recall",     r.get("context_recall")),
-        ]
-        scores = [v for _, v in metrics if v is not None]
-        mean_score = sum(scores) / len(scores) if scores else 0
-        for label, val in metrics:
-            if val is not None:
-                st.progress(val, text=f"{label}: {val:.2f}")
-        verdict = "✅ Good" if mean_score >= 0.8 else "⚠️ Needs work"
-        st.caption(f"Overall: **{verdict}** (mean {mean_score:.2f})")
-    else:
-        st.caption("Run evaluation (tab 2) to see scores.")
-
-    st.divider()
-
-    # Last query metrics
-    st.markdown("### ⏱ Last Query")
-    if st.session_state.last_latency is not None:
-        st.caption(f"Latency: {st.session_state.last_latency:.2f}s")
-        st.caption(f"Chunks retrieved: {st.session_state.last_chunks}")
-        st.caption(
-            f"Tokens: {st.session_state.last_tokens_in} in / "
-            f"{st.session_state.last_tokens_out} out"
-        )
-    else:
-        st.caption("No queries yet.")
-
-    queries_used = len(st.session_state.messages) // 2
-    st.caption(f"Queries this session: {queries_used}/{MAX_QUERIES_PER_SESSION}")
-
-    st.divider()
-
-    # ── Remembered context (from memory module) ──
-    st.markdown("### 🧠 Remembered Context")
-    memory = st.session_state.get("memory")
-    if memory:
-        blurb = memory.entities.get_context_blurb()
-        if blurb:
-            st.caption(blurb)
-        else:
-            st.caption("No context remembered yet.")
-    else:
-        st.caption("Memory not initialized.")
-
-    st.divider()
-    if st.button("🔄 Reset Conversation", use_container_width=True):
-        st.session_state.messages = []
-        st.session_state.last_latency   = None
-        st.session_state.last_chunks    = None
-        st.session_state.last_tokens_in = None
-        st.session_state.last_tokens_out= None
-        st.rerun()
-
-
-# ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
 
-tab_chat, tab_eval, tab_admin = st.tabs(["💬 Chat", "📋 Evaluation Dashboard", "🔐 Admin"])
+tab_chat, tab_eval, tab_admin = st.tabs(["Chat", "Evaluation", "Admin"])
 
 # ===========================================================================
 # TAB 1 — CHAT
@@ -337,98 +378,74 @@ tab_chat, tab_eval, tab_admin = st.tabs(["💬 Chat", "📋 Evaluation Dashboard
 
 with tab_chat:
 
-    # Header
-    crawl_date = (summary.get("finished_at_utc") or "unknown")[:10]
-    st.markdown(
-        f"""
-        <div class="bvrith-header">
-          <div>
-            <div class="bvrith-wordmark">BVRIT Hyderabad</div>
-            <div class="bvrith-tagline">Ask about admissions, fees, placements, hostel and more</div>
-          </div>
-          <div class="bvrith-status">
-            <span class="dot"></span>source current as of {safe(crawl_date)}
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    # Hero
+    render_hero(
+        title    = "BVRIT Hyderabad FAQ Assistant",
+        subtitle = "Grounded answers for admissions, departments, faculty, placements, facilities and more.",
+        pills    = ["Admissions", "Departments", "Faculty", "Placements", "Campus", "Research"],
+        status_line = f"Source current as of {crawl_date}",
     )
 
-    # Warn if not indexed
+    # Not-indexed warning
     if chunk_count == 0:
-        st.warning(
-            "⚠️ Knowledge base not indexed. Run `python ingest.py` first, "
-            "then refresh this page.",
-            icon="⚠️",
-        )
+        st.warning("Knowledge base not indexed. Run `python ingest.py` first, then refresh.", icon="⚠️")
 
-    # Quick-prompt chips
+    # ── Controls strip ───────────────────────────────────────────────────────
+    with st.container():
+        col_filter, col_model, col_topk, col_reset = st.columns([2, 2, 1, 1])
+
+        with col_filter:
+            section_filter_label = st.selectbox("Section", SECTIONS, index=0, label_visibility="collapsed")
+            effective_filter = None if section_filter_label == "All Sections" else section_filter_label
+
+        with col_model:
+            model = st.selectbox("Model", GENERATION_MODELS, index=0, label_visibility="collapsed")
+
+        with col_topk:
+            top_k = st.number_input("Top-K", min_value=3, max_value=10, value=5, label_visibility="collapsed")
+
+        with col_reset:
+            if st.button("Reset", use_container_width=True):
+                st.session_state.messages        = []
+                st.session_state.last_latency    = None
+                st.session_state.last_chunks     = None
+                st.session_state.last_tokens_in  = None
+                st.session_state.last_tokens_out = None
+                st.rerun()
+
+    # ── Remembered context (from memory module) ──
+    memory = st.session_state.get("memory")
+    if memory:
+        blurb = memory.entities.get_context_blurb()
+        if blurb:
+            st.caption(f"🧠 {blurb}")
+
+    # ── Quick-prompt chips ───────────────────────────────────────────────────
     chip_cols = st.columns(len(QUICK_PROMPTS))
     for col, label in zip(chip_cols, QUICK_PROMPTS):
         if col.button(label, use_container_width=True):
             st.session_state.pending_prompt = label
 
-    st.markdown("---")
+    # ── Chat history ─────────────────────────────────────────────────────────
+    st.markdown('<div class="chat-wrap">', unsafe_allow_html=True)
+    if not st.session_state.messages:
+        st.caption("Ask about admissions, fees, departments, faculty, placements, campus facilities or contact details.")
+    else:
+        for msg in st.session_state.messages:
+            render_message(msg)
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    # Message thread
-    for msg in st.session_state.messages:
-        if msg["role"] == "user":
-            st.markdown(
-                f'<div class="user-msg">{safe(msg["content"])}</div>',
-                unsafe_allow_html=True,
-            )
-        else:
-            refused  = msg.get("refused", False)
-            no_pred  = msg.get("no_prediction", False)
+    # ── Last query stats (compact, below chat) ───────────────────────────────
+    if st.session_state.last_latency is not None:
+        sc1, sc2, sc3, sc4 = st.columns(4)
+        sc1.metric("Latency", f"{st.session_state.last_latency:.2f}s")
+        sc2.metric("Chunks used", st.session_state.last_chunks)
+        sc3.metric("Tokens in",  st.session_state.last_tokens_in)
+        sc4.metric("Tokens out", st.session_state.last_tokens_out)
 
-            if refused:
-                badge = '<span class="badge badge-red">REFUSED</span>'
-            elif no_pred:
-                badge = '<span class="badge badge-amber">⚠ Documented stats only</span>'
-            else:
-                badge = '<span class="badge badge-green">Cited</span>'
+    # ── Chat input ───────────────────────────────────────────────────────────
+    chat_input = st.chat_input("Ask about BVRIT Hyderabad…", max_chars=MAX_INPUT_CHARS)
 
-            st.markdown(
-                f'<div class="assistant-answer">'
-                f'{safe(msg["content"])}{badge}'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-            # Citations (only trust ALLOWED_DOMAIN)
-            for cit in msg.get("citations", []):
-                if citation_trusted(cit):
-                    st.markdown(
-                        f'<div class="citation">📄 {safe(cit)}</div>',
-                        unsafe_allow_html=True,
-                    )
-
-            # Images (NEW: display images if available)
-            images = msg.get("images", [])
-            if images:
-                st.markdown("---")
-                n_cols = min(3, len(images))
-                cols = st.columns(n_cols)
-                for idx, img in enumerate(images[:6]):
-                    col = cols[idx % n_cols]
-                    with col:
-                        name = img.get("semantic_name") or img.get("context_heading") or "Image"
-                        img_url = img.get("url") or img.get("src", "")
-                        if img_url:
-                            st.markdown(
-                                f'<img src="{html.escape(img_url)}" style="width:100%;border-radius:6px;">',
-                                unsafe_allow_html=True,
-                            )
-                            st.caption(name)
-                        else:
-                            st.caption(f"🖼️ {name}")
-
-    # Chat input
-    chat_input = st.chat_input(
-        "Ask about BVRIT Hyderabad…",
-        max_chars=MAX_INPUT_CHARS,
-    )
-
-    # Resolve pending prompt (from quick chips)
     prompt = chat_input
     if st.session_state.pending_prompt:
         prompt = st.session_state.pending_prompt
@@ -441,23 +458,12 @@ with tab_chat:
         if queries_used >= MAX_QUERIES_PER_SESSION:
             st.warning("Session query limit reached. Reset the conversation to continue.")
         elif prompt:
-            # Show user message immediately before waiting for the answer
-            st.markdown(
-                f'<div class="user-msg">{safe(prompt)}</div>',
-                unsafe_allow_html=True,
-            )
-
             st.session_state.messages.append({"role": "user", "content": prompt})
 
             if chunk_count == 0:
-                # Not indexed — return a canned response
                 answer_msg = {
                     "role": "assistant",
-                    "content": (
-                        "The knowledge base hasn't been indexed yet. "
-                        "Please run `python ingest.py` to build the vector store, "
-                        "then refresh and try again."
-                    ),
+                    "content": "The knowledge base hasn't been indexed yet. Please run `python ingest.py` to build the vector store, then refresh.",
                     "citations": [],
                     "refused": True,
                 }
@@ -466,18 +472,17 @@ with tab_chat:
                     try:
                         from rag import answer_question
                         result = answer_question(
-                            question=prompt,
-                            section_filter=effective_filter,
-                            top_k=top_k,
-                            model=model,
-                            history=[
+                            question      = prompt,
+                            section_filter= effective_filter,
+                            top_k         = top_k,
+                            model         = model,
+                            history       = [
                                 m for m in st.session_state.messages[:-1]
                                 if m["role"] in ("user", "assistant")
                             ],
-                            session_id=st.session_state.session_id,
-                            memory=st.session_state.memory,
+                            session_id    = st.session_state.session_id,
+                            memory        = st.session_state.memory,
                         )
-                        # Update last-query metrics in sidebar
                         st.session_state.last_latency    = result.latency_s
                         st.session_state.last_chunks     = result.chunks_retrieved
                         st.session_state.last_tokens_in  = result.tokens_in
@@ -489,18 +494,18 @@ with tab_chat:
                         )
                         answer_msg = {
                             "role":          "assistant",
-                            "content":       result.answer,
+                            "content":       strip_inline_citations(result.answer),
                             "citations":     result.citations,
-                            "images":        result.images,  # NEW: include images
+                            "images":        result.images,
                             "refused":       result.refused,
                             "no_prediction": no_pred,
                         }
                     except Exception as e:
                         answer_msg = {
-                            "role":      "assistant",
-                            "content":   f"Sorry, an error occurred: {e}",
+                            "role": "assistant",
+                            "content": f"An error occurred: {e}",
                             "citations": [],
-                            "refused":   True,
+                            "refused": True,
                         }
 
             st.session_state.messages.append(answer_msg)
@@ -508,26 +513,33 @@ with tab_chat:
 
 
 # ===========================================================================
-# TAB 2 — EVALUATION DASHBOARD  (spec §6.3)
+# TAB 2 — EVALUATION
 # ===========================================================================
 
 with tab_eval:
-    st.markdown("## 📋 Evaluation Dashboard")
-    st.caption(
-        "Runs the 8-dimension test suite against the live chatbot. "
-        "Uses a separate judge model (Gemma 3 12B) to score each answer."
+
+    render_hero(
+        title    = "Evaluation Dashboard",
+        subtitle = "Functional checks, safety probes, retrieval quality, and RAGAS metrics.",
+        pills    = ["Functional", "Safety", "Retrieval", "RAGAS"],
+        status_line = "Live chatbot under test",
     )
 
-    col_run, col_opts = st.columns([2, 3])
-    with col_opts:
-        skip_ragas  = st.checkbox("Skip RAGAS (faster)", value=False)
-        dim_options = ["All"] + [f"{k} — {v}" for k, v in {
-            "01":"Functional","02":"Quality","03":"Safety","04":"Security",
-            "05":"Robustness","06":"Performance","07":"Context","08":"RAGAS",
-        }.items()]
+    # ── Run controls ─────────────────────────────────────────────────────────
+    ctrl_a, ctrl_b, ctrl_c = st.columns([1, 1, 2])
+    with ctrl_a:
+        run_btn = st.button("Run Evaluation", type="primary", use_container_width=True)
+    with ctrl_b:
+        skip_ragas = st.checkbox("Skip RAGAS", value=False)
+    with ctrl_c:
+        dim_options = ["All"] + [
+            f"{k} — {v}" for k, v in {
+                "01": "Functional", "02": "Quality",  "03": "Safety",
+                "04": "Security",   "05": "Robustness","06": "Performance",
+                "07": "Context",    "08": "RAGAS",
+            }.items()
+        ]
         dim_select = st.selectbox("Run dimension", dim_options, index=0)
-    with col_run:
-        run_btn = st.button("▶ Run Evaluation", type="primary", use_container_width=True)
 
     if run_btn:
         dim_filter = None if dim_select == "All" else dim_select[:2]
@@ -538,17 +550,16 @@ with tab_eval:
                 st.session_state.eval_report = report
             except Exception as e:
                 st.error(f"Evaluation failed: {e}")
-                report = None
 
     report = st.session_state.get("eval_report")
 
     if not report:
-        st.info("Click **▶ Run Evaluation** to start. Results appear here.")
+        st.info("Click **Run Evaluation** to start. Results appear here.")
     else:
-        s = report["summary"]
+        s        = report["summary"]
         pass_pct = int(s["pass_rate"] * 100)
 
-        # ── Summary banner ───────────────────────────────────────────────────
+        # ── Summary banner ────────────────────────────────────────────────────
         st.markdown(
             f"""
             <div class="summary-banner">
@@ -562,20 +573,15 @@ with tab_eval:
             unsafe_allow_html=True,
         )
 
-        # ── Per-dimension 4×2 grid ───────────────────────────────────────────
+        # ── Dimension results ─────────────────────────────────────────────────
         st.markdown("### Dimension Results")
         dims = report.get("dimensions", [])
         rows = [dims[i:i+2] for i in range(0, len(dims), 2)]
-
         for row in rows:
             cols = st.columns(2)
             for col, dim in zip(cols, row):
                 with col:
-                    total_d = dim["total"]
-                    passed_d = dim["passed"]
-                    failed_d = dim["failed"]
-                    warned_d = dim["warned"]
-                    color = "#155724" if failed_d == 0 else "#721c24"
+                    color = "#155724" if dim["failed"] == 0 else "#721c24"
                     st.markdown(
                         f"""
                         <div class="dim-card">
@@ -583,94 +589,94 @@ with tab_eval:
                             {safe(dim['id'])} {safe(dim['name'])}
                           </div>
                           <div class="dim-counts">
-                            ✓ {passed_d} passed &nbsp;|&nbsp;
-                            ✗ {failed_d} failed &nbsp;|&nbsp;
-                            ⚠ {warned_d} warnings &nbsp;|&nbsp;
-                            {total_d} total
+                            {dim['passed']} passed &nbsp;|&nbsp;
+                            {dim['failed']} failed &nbsp;|&nbsp;
+                            {dim['warned']} warnings &nbsp;|&nbsp;
+                            {dim['total']} total
                           </div>
                         </div>
                         """,
                         unsafe_allow_html=True,
                     )
-                    # Show checks
                     for case in dim.get("cases", []):
-                        icon = {"PASS":"✅","FAIL":"❌","WARN":"⚠️"}.get(case["verdict"],"❓")
+                        icon = {"PASS": "✅", "FAIL": "❌", "WARN": "⚠️"}.get(case["verdict"], "❓")
                         st.caption(f"{icon} {case['id']}: {case['reason'][:80]}")
 
-        # ── Failed test details ──────────────────────────────────────────────
+        # ── Failed test details ───────────────────────────────────────────────
         all_cases = [c for d in dims for c in d.get("cases", [])]
         failures  = [c for c in all_cases if c["verdict"] == "FAIL"]
         if failures:
-            st.markdown("### ❌ Failed Test Details")
+            st.markdown("### Failed Test Details")
             for c in failures:
                 with st.expander(f"{c['id']} — {c['reason'][:60]}"):
                     st.markdown(f"**Question:** {safe(c['question'])}")
                     st.markdown(f"**Answer:** {safe(c['answer'][:400])}")
-                    st.markdown(f"**Root cause:** {safe(c.get('root_cause',''))}")
-                    st.markdown(f"**Suggested fix:** {safe(c.get('fix',''))}")
+                    st.markdown(f"**Root cause:** {safe(c.get('root_cause', ''))}")
+                    st.markdown(f"**Suggested fix:** {safe(c.get('fix', ''))}")
 
-        # ── Weakest dimension callout ────────────────────────────────────────
+        # ── Weakest dimension ─────────────────────────────────────────────────
         wd = report.get("weakest_dimension")
         if wd:
-            st.markdown("### 🔧 Weakest Dimension — Recommended Fix")
+            st.markdown("### Weakest Dimension")
             st.warning(
-                f"**{wd['id']} {wd['name']}** "
-                f"({int(wd['pass_rate']*100)}% pass rate)  \n"
-                f"{wd['fix']}"
+                f"**{wd['id']} {wd['name']}** ({int(wd['pass_rate']*100)}% pass rate)\n\n{wd['fix']}"
             )
 
-        # ── RAGAS bars ───────────────────────────────────────────────────────
+        # ── RAGAS metrics ─────────────────────────────────────────────────────
         ragas = report.get("ragas", {})
         if ragas and "error" not in ragas:
-            st.markdown("### 📈 RAGAS Metrics")
+            st.markdown("### RAGAS Metrics")
             metric_info = [
-                ("faithfulness",      "Faithfulness",      "Are all claims in the answer supported by retrieved context?"),
+                ("faithfulness",      "Faithfulness",      "Are all claims supported by retrieved context?"),
                 ("answer_relevancy",  "Answer Relevancy",  "Does the answer address what was asked?"),
                 ("context_precision", "Context Precision", "Were the retrieved chunks actually useful?"),
                 ("context_recall",    "Context Recall",    "Did retrieval find all the relevant chunks?"),
             ]
-            scores = [ragas[k] for k, _, _ in metric_info if ragas.get(k) is not None]
-            mean_score = sum(scores) / len(scores) if scores else 0
-
-            for key, label, tooltip in metric_info:
+            mcols = st.columns(2)
+            for idx, (key, label, tooltip) in enumerate(metric_info):
                 val = ragas.get(key)
                 if val is not None:
-                    st.progress(val, text=f"{label}: {val:.3f}")
-                    st.caption(f"↳ {tooltip}")
+                    with mcols[idx % 2]:
+                        st.markdown(
+                            f'<div class="dim-card"><div class="dim-title">{label}</div>'
+                            f'<div class="dim-counts">{tooltip}</div></div>',
+                            unsafe_allow_html=True,
+                        )
+                        st.progress(val, text=f"{val:.3f}")
 
-            # Diagnosis line
+            scores = [ragas[k] for k, _, _ in metric_info if ragas.get(k) is not None]
             if scores:
-                weakest_metric = min(metric_info, key=lambda t: ragas.get(t[0]) or 1.0)
+                weakest = min(metric_info, key=lambda t: ragas.get(t[0]) or 1.0)
                 diagnoses = {
-                    "context_precision": "Context Precision is the weakest metric — consider reducing chunk_size or adding section metadata filters.",
-                    "context_recall":    "Context Recall is the weakest metric — consider increasing top_k or chunk overlap.",
-                    "faithfulness":      "Faithfulness is the weakest metric — tighten the GROUNDING RULE in the system prompt.",
-                    "answer_relevancy":  "Answer Relevancy is the weakest metric — check that retrieved chunks are not too noisy (Pipeline B mode).",
+                    "context_precision": "Consider reducing chunk_size or adding section metadata filters.",
+                    "context_recall":    "Consider increasing top_k or chunk overlap.",
+                    "faithfulness":      "Tighten the GROUNDING RULE in the system prompt.",
+                    "answer_relevancy":  "Check that retrieved chunks are not too noisy.",
                 }
-                st.info(diagnoses.get(weakest_metric[0], "Review retrieval configuration."))
-
+                st.info(diagnoses.get(weakest[0], "Review retrieval configuration."))
         elif ragas.get("error"):
-            st.caption(f"RAGAS: {ragas['error']}")
+            st.caption(f"RAGAS skipped: {ragas['error']}")
 
-        # ── Residual risk statement (spec §9.5) ──────────────────────────────
-        st.markdown("### 🔒 Security — Residual Risk Statement")
-        st.info(report.get("residual_risk_statement", ""))
+        # ── Security residual risk ────────────────────────────────────────────
+        if report.get("residual_risk_statement"):
+            st.markdown("### Security — Residual Risk")
+            st.info(report["residual_risk_statement"])
 
-        # ── Download report ──────────────────────────────────────────────────
+        # ── Download ──────────────────────────────────────────────────────────
         st.download_button(
-            label="⬇ Download JSON Report",
-            data=json.dumps(report, indent=2),
-            file_name="bvrit_eval_report.json",
-            mime="application/json",
+            label     = "Download JSON Report",
+            data      = json.dumps(report, indent=2),
+            file_name = "bvrit_eval_report.json",
+            mime      = "application/json",
         )
 
 
 # ===========================================================================
-# TAB 3 — ADMIN DASHBOARD  (governance + audit)
+# TAB 3 — ADMIN DASHBOARD (governance + audit)
 # ===========================================================================
 
 with tab_admin:
-    st.markdown("## 🔐 Admin Dashboard")
+    st.markdown("## Admin Dashboard")
     st.caption("Governance, audit logging, and usage statistics.")
 
     try:
@@ -687,7 +693,7 @@ with tab_admin:
         st.divider()
 
         # Model distribution
-        st.markdown("### 📊 Model Distribution")
+        st.markdown("### Model Distribution")
         dist = stats.get("model_distribution", {})
         if dist:
             for model_name, count in dist.items():
@@ -698,29 +704,30 @@ with tab_admin:
         st.divider()
 
         # Rate limit info
-        st.markdown("### ⚡ Rate Limiting")
+        st.markdown("### Rate Limiting")
         limiter = RateLimiter(max_per_session=40, max_per_minute=10)
         usage = limiter.get_usage(st.session_state.get("session_id", "default"))
         st.caption(f"Session queries: {usage['session_queries']} / {usage['max_per_session']}")
         st.caption(f"Remaining: {usage['remaining']}")
-        st.caption("Max per minute: 10")
 
         st.divider()
 
         # Recent audit log
-        st.markdown("### 📋 Recent Activity")
+        st.markdown("### Recent Activity")
         recent = audit.get_recent(limit=20)
         if recent:
             for entry in recent:
-                flags = json.loads(entry.get("flags", "[]"))
-                flag_badge = ""
-                if flags:
-                    flag_badge = f' <span class="badge badge-amber">{" ".join(flags)}</span>'
+                flags_str = entry.get("flags", "[]")
+                try:
+                    import json as _j
+                    flags = _j.loads(flags_str) if isinstance(flags_str, str) else flags_str
+                except Exception:
+                    flags = []
+                flag_badge = f" [{', '.join(flags)}]" if flags else ""
                 st.markdown(
                     f"**{entry['timestamp'][:19]}** | {entry['model']} | "
                     f"{entry['latency_s']:.1f}s | {entry['tokens_in'] + entry['tokens_out']} tokens"
                     f"{flag_badge}",
-                    unsafe_allow_html=True,
                 )
                 st.caption(f"Q: {entry['query'][:120]}")
                 st.caption(f"A: {entry['response'][:120]}")
@@ -731,11 +738,10 @@ with tab_admin:
         st.divider()
 
         # Prompt version
-        st.markdown("### 📝 Prompt Version")
+        st.markdown("### Prompt Version")
         last_entry = recent[0] if recent else None
         if last_entry and last_entry.get("prompt_version"):
             st.caption(f"Last used prompt version: `{last_entry['prompt_version']}`")
-            st.caption("Prompt versions are SHA256 hashes of the system prompt template.")
         else:
             st.caption("No prompt version tracked yet.")
 

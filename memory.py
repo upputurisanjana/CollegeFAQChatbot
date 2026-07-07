@@ -1,11 +1,5 @@
 """
 memory.py — Conversation Memory + Entity Store for BVRIT Chatbot
-=================================================================
-Provides session-level and cross-session memory via SQLite persistence.
-
-Components:
-  - ConversationMemory: structured history with summarization
-  - EntityStore: extract and persist entities from conversation
 """
 
 import json
@@ -15,11 +9,8 @@ import threading
 from datetime import datetime
 from typing import Optional
 
-from config import DB_PATH
+DB_PATH = "chat_history.db"
 
-# ---------------------------------------------------------------------------
-# Entity extraction patterns
-# ---------------------------------------------------------------------------
 
 _NAME_PATTERN = re.compile(
     r"\b(?:my name is|I am|I'm|call me|this is)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
@@ -62,10 +53,6 @@ def _extract_topics(text: str) -> list[str]:
             topics.append(topic)
     return topics
 
-
-# ---------------------------------------------------------------------------
-# Entity Store
-# ---------------------------------------------------------------------------
 
 class EntityStore:
     """Persist and retrieve conversation entities across sessions."""
@@ -128,7 +115,6 @@ class EntityStore:
         return result
 
     def update_from_conversation(self, messages: list[dict]):
-        """Scan messages for new entities and persist them."""
         for msg in messages:
             text = msg.get("content", "")
             if not text:
@@ -143,14 +129,13 @@ class EntityStore:
             if merged != existing_list:
                 self.set("user", "departments", json.dumps(merged))
             topics = _extract_topics(text)
-            existing_topics = self.get("user", "topics")
-            existing_topics_list = json.loads(existing_topics) if existing_topics else []
-            merged_topics = list(set(existing_topics_list + topics))
-            if merged_topics != existing_topics_list:
-                self.set("user", "topics", json.dumps(merged_topics))
+            existing_ts = self.get("user", "topics")
+            existing_tl = json.loads(existing_ts) if existing_ts else []
+            merged_t = list(set(existing_tl + topics))
+            if merged_t != existing_tl:
+                self.set("user", "topics", json.dumps(merged_t))
 
     def get_context_blurb(self) -> str:
-        """Return a human-readable summary of remembered entities."""
         parts = []
         name = self.get("user", "name")
         if name:
@@ -159,18 +144,14 @@ class EntityStore:
         if depts_str:
             depts = json.loads(depts_str)
             if depts:
-                parts.append(f"Departments mentioned: {', '.join(depts)}")
+                parts.append(f"Departments: {', '.join(depts)}")
         topics_str = self.get("user", "topics")
         if topics_str:
             topics = json.loads(topics_str)
             if topics:
-                parts.append(f"Topics discussed: {', '.join(topics)}")
+                parts.append(f"Topics: {', '.join(topics)}")
         return " | ".join(parts) if parts else ""
 
-
-# ---------------------------------------------------------------------------
-# Conversation Memory
-# ---------------------------------------------------------------------------
 
 class ConversationMemory:
     """Manages conversation history with summarization and entity tracking."""
@@ -180,27 +161,13 @@ class ConversationMemory:
         self.max_verbatim_turns = max_verbatim_turns
         self.entities = EntityStore(session_id)
 
-    def prepare_messages(
-        self,
-        history: list[dict],
-        current_question: str,
-    ) -> list[dict]:
-        """Build message list: system, context, history, current question.
-
-        Strategy:
-        - Keep last `max_verbatim_turns` exchanges verbatim.
-        - Older turns are condensed into a summary message.
-        - Entity context is injected as a system-level note.
-        """
+    def prepare_messages(self, history: list[dict]) -> list[dict]:
         if not history:
             return self._build_with_entities([])
-
         msgs = [m for m in history if m["role"] in ("user", "assistant")]
         window = self.max_verbatim_turns * 2
-
         if len(msgs) <= window:
             return self._build_with_entities(msgs[-window:])
-
         older = msgs[:-window]
         summary_parts = []
         for m in older:
@@ -208,14 +175,12 @@ class ConversationMemory:
             content = m.get("content", "")[:150]
             summary_parts.append(f"{label}: {content}")
         summary_text = "Previous conversation summary:\n" + "\n".join(summary_parts)
-
         recent = msgs[-window:]
         return self._build_with_entities(
             [{"role": "user", "content": summary_text}] + recent,
         )
 
     def _build_with_entities(self, history_msgs: list[dict]) -> list[dict]:
-        """Inject entity memory as a system hint."""
         blurb = self.entities.get_context_blurb()
         if blurb:
             entity_msg = {
@@ -230,5 +195,4 @@ class ConversationMemory:
         return history_msgs
 
     def update(self, messages: list[dict]):
-        """Update entity store from the latest messages."""
         self.entities.update_from_conversation(messages)
