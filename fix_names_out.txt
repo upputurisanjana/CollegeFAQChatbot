@@ -1,2 +1,0 @@
-Fixed 0 images — copied context_heading to semantic_name
-Images with semantic_name: 724 / 748

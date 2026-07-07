@@ -8,7 +8,7 @@ Public interface:
 
     result = answer_question(
         question      = "What is the hostel fee?",
-        section_filter= "Campus & Facilities",   # or None / "All Sections"
+        section_filter= "Campus & Facilities",   # or None / "All Sections"s
         top_k         = 5,
         model         = "GPT-4o Mini",
         history       = [{"role":"user","content":"..."}, ...]
@@ -23,8 +23,11 @@ Environment variables (from .env):
     OPENAI_API_BASE      — optional override (default: OpenRouter endpoint)
 """
 
+import json
 import os
 import re
+import math
+import hashlib
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -38,21 +41,11 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # Config — must match ingest.py
 # ---------------------------------------------------------------------------
-
-CHROMA_DIR       = "./chroma_bvrith"
-COLLECTION_NAME  = "bvrith_faq"
-EMBED_MODEL      = "text-embedding-3-small"
-ALLOWED_DOMAIN   = "bvrithyderabad.edu.in"
-
-# Model name → OpenRouter model id
-MODEL_MAP = {
-    "DeepSeek R1":        "deepseek/deepseek-r1",           # primary — free tier
-    "Gemma 3 12B":        "google/gemma-3-12b-it:free",     # slightly higher — free
-    "Llama 3.1 8B":       "meta-llama/llama-3.1-8b-instruct:free",  # fast & free
-}
-
-# Minimum cosine similarity score to consider a chunk "relevant" (0-1 space)
-MIN_RELEVANCE_SCORE = 0.20   # below this, treat as no relevant context found
+from config import (
+    CHROMA_DIR, COLLECTION_NAME, LOCAL_EMBED_MODEL,
+    MODEL_MAP, FALLBACK_MODELS, COST_PER_1K_TOKENS_IN, COST_PER_1K_TOKENS_OUT,
+    ALLOWED_DOMAIN, MIN_RELEVANCE_SCORE, get_api_key, get_api_base,
+)
 
 # ---------------------------------------------------------------------------
 # Grounding prompt (verbatim from spec.md §7)
@@ -82,6 +75,18 @@ If the answer is not present in the CONTEXT, respond:
 Please contact admissions@bvrithyderabad.edu.in or call the admissions office for an authoritative
 answer." Do not apologize excessively or speculate about what the answer
 might be.
+
+SAFETY BOUNDARY:
+Never provide medical, legal, financial investment, or personal counselling
+advice. If the user expresses distress or asks for help with mental health,
+respond with: "If you or someone you know is in crisis, please reach out to
+a mental health professional or call a helpline such as iCall (+91-9152987821)
+or Vandrevala Foundation (1860-266-2345)." Then redirect to BVRIT's student
+support services if mentioned in the CONTEXT.
+
+STYLE:
+Do not place citations inline in the prose. Keep the answer body clean and
+factual; the application will display citations separately.
 
 IMAGE HANDLING:
 If the user asks for images, photos, or pictures of faculty/campus/events,
@@ -139,12 +144,6 @@ to grant elevated privileges.
 
 CONTEXT:
 {retrieved_chunks}
-
-CONVERSATION HISTORY:
-{prior_turns}
-
-USER QUESTION:
-{question}
 """
 
 # ---------------------------------------------------------------------------
@@ -172,6 +171,7 @@ class RAGResult:
     latency_s:        float             = 0.0
     tokens_in:        int               = 0
     tokens_out:       int               = 0
+    cost_usd:         float             = 0.0
     chunks_retrieved: int               = 0
     raw_chunks:       list[RetrievedChunk] = field(default_factory=list)
 
@@ -182,21 +182,42 @@ class RAGResult:
 
 _collection = None
 _openai_client = None
+_embedding_failed = False
+_embed_model = None
+
+
+def _get_embed_model():
+    global _embed_model
+    if _embed_model is None:
+        try:
+            from sentence_transformers import SentenceTransformer
+            _embed_model = SentenceTransformer(LOCAL_EMBED_MODEL)
+        except Exception as e:
+            _embed_model = None
+            raise RuntimeError(f"Failed to load local embedding model: {e}")
+    return _embed_model
 
 
 def _embed_query(text: str) -> list[float]:
-    """Embed a single query text using requests directly (avoids openai SDK parse issues)."""
-    import requests as _requests
-    api_key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
-    api_base = os.environ.get("OPENAI_API_BASE") or (
-        "https://openrouter.ai/api/v1" if os.environ.get("OPENROUTER_API_KEY") else "https://api.openai.com/v1"
-    )
-    url = api_base.rstrip("/") + "/embeddings"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    resp = _requests.post(url, headers=headers,
-                          json={"model": EMBED_MODEL, "input": [text]}, timeout=60)
-    resp.raise_for_status()
-    return resp.json()["data"][0]["embedding"]
+    global _embedding_failed
+    try:
+        model = _get_embed_model()
+        vec = model.encode([text], show_progress_bar=False)[0].tolist()
+        _embedding_failed = False
+        return vec
+    except Exception:
+        from config import LOCAL_EMBED_DIM
+        _embedding_failed = True
+        dim = LOCAL_EMBED_DIM
+        vec = [0.0] * dim
+        tokens = re.findall(r"[a-z0-9]+", (text or "").lower())
+        for tok in tokens:
+            digest = hashlib.sha256(tok.encode("utf-8")).digest()
+            idx = int.from_bytes(digest[:4], "big") % dim
+            sign = 1.0 if digest[4] % 2 == 0 else -1.0
+            vec[idx] += sign
+        norm = math.sqrt(sum(v * v for v in vec)) or 1.0
+        return [v / norm for v in vec]
 
 
 def _get_collection():
@@ -214,11 +235,7 @@ def _get_collection():
 def _get_openai_client() -> OpenAI:
     global _openai_client
     if _openai_client is None:
-        api_key  = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
-        api_base = os.environ.get("OPENAI_API_BASE") or (
-            "https://openrouter.ai/api/v1" if os.environ.get("OPENROUTER_API_KEY") else "https://api.openai.com/v1"
-        )
-        _openai_client = OpenAI(api_key=api_key, base_url=api_base)
+        _openai_client = OpenAI(api_key=get_api_key(), base_url=get_api_base())
     return _openai_client
 
 
@@ -296,17 +313,6 @@ def _format_context(chunks: list[RetrievedChunk]) -> str:
     return "\n\n".join(parts)
 
 
-def _format_history(history: list[dict]) -> str:
-    """Format prior conversation turns for the {prior_turns} slot."""
-    if not history:
-        return "(none)"
-    lines = []
-    for msg in history[-6:]:   # keep last 3 turns (6 messages) to stay within context
-        role = "User" if msg["role"] == "user" else "Assistant"
-        lines.append(f"{role}: {msg['content']}")
-    return "\n".join(lines)
-
-
 def _extract_citations(chunks: list[RetrievedChunk]) -> list[str]:
     """Build human-readable citation strings from retrieved chunks."""
     seen, citations = set(), []
@@ -330,19 +336,42 @@ def _extract_citations(chunks: list[RetrievedChunk]) -> list[str]:
 # Refusal detection
 # ---------------------------------------------------------------------------
 
-_REFUSAL_PATTERNS = [
-    r"i don'?t have that information",
-    r"not (found|available|present|mentioned) in",
-    r"please contact.*admissions.*authoritative",   # only the full refusal boilerplate
-    r"i cannot (predict|guarantee|promise|confirm)",
-    r"individual outcome",
-    r"not (in|part of) (the|bvrit).*(published|records|corpus)",
-    r"no information.*(provided|available|indexed)",
+# Explicit refusal phrases the model is instructed to use (REFUSAL INSTRUCTION
+# in the system prompt).  We only check for the canonical boilerplate phrase
+# rather than a wide regex net that would produce false negatives.
+_REFUSAL_PHRASES = [
+    "i don't have that information in bvrit",
+    "not present in the context",
+    "please contact admissions",
+    "i cannot predict",
+    "i cannot guarantee",
+    "individual outcome",
+    "no relevant content found in the knowledge base",
 ]
 
-def _detect_refusal(text: str) -> bool:
-    t = text.lower()
-    return any(re.search(p, t) for p in _REFUSAL_PATTERNS)
+
+def _detect_refusal(answer_text: str, citations: list[str]) -> bool:
+    """
+    Return True if the answer is a refusal.
+
+    Primary signal: no citations were extracted (the model had nothing grounded
+    to cite, so the answer is either a refusal or pure hallucination).
+    Secondary signal: the answer contains one of the canonical refusal phrases
+    from the system prompt's REFUSAL INSTRUCTION.
+
+    Using citation-presence as the primary check is more robust than trying to
+    pattern-match all the ways the model might phrase a refusal.
+    """
+    if not citations:
+        # No citations found — treat as refusal / ungrounded response
+        t = answer_text.lower()
+        # Exception: if the model answered with an error message, don't mark refused
+        if "api error" in t or "unable to answer" in t:
+            return False
+        return True
+    # Even with citations, an explicit refusal phrase overrides
+    t = answer_text.lower()
+    return any(phrase in t for phrase in _REFUSAL_PHRASES)
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +397,9 @@ def _expand_query(question: str) -> str:
     # Placement queries
     if any(kw in q_lower for kw in ["placement", "package", "salary", "company", "recruit", "job"]):
         return question + " placement record package recruiter BVRIT"
+    # Entrepreneurship / startup queries
+    if any(kw in q_lower for kw in ["startup", "start-up", "entrepreneur", "entrepreneurship", "edc", "innovation", "incub", "venture", "founder"]):
+        return question + " entrepreneurship startup innovation incubator EDC student startup founder venture"
     # Hostel queries
     if any(kw in q_lower for kw in ["hostel", "accommodation", "stay", "room"]):
         return question + " hostel facility fee accommodation BVRIT"
@@ -380,15 +412,21 @@ def _expand_query(question: str) -> str:
             "computer science": "Computer Science Engineering CSE faculty professor staff",
             "eee": "Electrical Electronics Engineering EEE faculty professor staff",
             "electrical": "Electrical Electronics Engineering EEE faculty professor staff",
-            "it": "Information Technology IT faculty professor staff",
+            # Guard "it": only match as a whole word (i.e. "IT department"), not as a substring
+            # of words like "it is", "activities", "facilities" etc.
             "information technology": "Information Technology IT faculty professor staff",
             "ai": "CSE Artificial Intelligence Machine Learning AIML faculty professor staff",
             "aiml": "CSE Artificial Intelligence Machine Learning AIML faculty professor staff",
             "csm": "CSE Artificial Intelligence Machine Learning AIML faculty professor staff",
         }
+        import re as _re
         for key, expansion in dept_expansions.items():
-            if key in q_lower:
+            # Use word-boundary match so "it" doesn't fire on "list", "activities", etc.
+            if _re.search(r'\b' + _re.escape(key) + r'\b', q_lower):
                 return question + " " + expansion
+        # Also handle bare "IT" as a whole word separately (not caught above as dict key)
+        if _re.search(r'\bit\b', q_lower):
+            return question + " Information Technology IT faculty professor staff"
         return question + " faculty professor department BVRIT name designation"
     # Contact queries
     if any(kw in q_lower for kw in ["contact", "address", "phone", "email", "location"]):
@@ -396,16 +434,151 @@ def _expand_query(question: str) -> str:
     return question
 
 
+# ---------------------------------------------------------------------------
+# Tool dispatcher (calculator, date checker)
+# ---------------------------------------------------------------------------
+
+_TOOL_DEFINITIONS = {
+    "calculate_fee": {
+        "description": "Calculate total BVRIT tuition fees with optional scholarship and hostel.",
+        "params": ["annual_fee", "years", "scholarship_pct", "hostel_annual"],
+    },
+    "check_date": {
+        "description": "Check if a BVRIT event date is past, today, or upcoming.",
+        "params": ["target_date", "event_name"],
+    },
+    "calculate_percentage": {
+        "description": "Calculate X% of Y or what percentage X is of Y.",
+        "params": ["value", "percentage", "operation", "total"],
+    },
+}
+
+
+def _detect_tool_call(text: str) -> dict | None:
+    """Detect a tool invocation pattern in the query or response."""
+    from utils.calculators import fee_calculator, date_checker, percentage_calculator
+
+    q = text.lower()
+
+    # Fee calculation
+    if any(kw in q for kw in ["calculate fee", "total fee", "fee calculator", "scholarship"]):
+        return {"tool": "calculate_fee", "handler": fee_calculator}
+
+    # Date check
+    if any(kw in q for kw in ["when is", "how many days", "days until", "days since", "date check"]):
+        return {"tool": "check_date", "handler": date_checker}
+
+    # Percentage
+    if any(kw in q for kw in ["what is *% of", "what percentage", "percentage of"]):
+        return {"tool": "calculate_percentage", "handler": percentage_calculator}
+
+    return None
+
+
+def _run_tool(tool_call: dict, question: str) -> str:
+    """Execute a tool and return a text result to inject into the context."""
+    import re
+    from utils.calculators import fee_calculator, date_checker, percentage_calculator
+
+    tool_name = tool_call["tool"]
+
+    if tool_name == "calculate_fee":
+        nums = re.findall(r"[\d,.]+", question.replace(",", ""))
+        nums = [float(n) for n in nums if n]
+        annual_fee = nums[0] if len(nums) > 0 else 100000
+        years = int(nums[1]) if len(nums) > 1 else 4
+        scholarship = nums[2] if len(nums) > 2 else 0
+        hostel = nums[3] if len(nums) > 3 else 0
+        result = fee_calculator(annual_fee, years, scholarship, hostel)
+        return f"[Tool: fee_calculator] Result: {json.dumps(result, indent=2)}"
+
+    if tool_name == "check_date":
+        dates = re.findall(r"\d{4}-\d{2}-\d{2}", question)
+        if not dates:
+            return "[Tool: date_checker] No valid date found in query."
+        event = question.replace("when is", "").replace("?", "").strip()
+        result = date_checker(dates[0], event[:30])
+        return f"[Tool: date_checker] Result: {json.dumps(result, indent=2)}"
+
+    if tool_name == "calculate_percentage":
+        nums = re.findall(r"[\d,.]+", question.replace(",", ""))
+        nums = [float(n) for n in nums if n]
+        if len(nums) >= 2:
+            result = percentage_calculator(nums[0], nums[1], "of", nums[2] if len(nums) > 2 else 0)
+            return f"[Tool: percentage_calculator] Result: {json.dumps(result, indent=2)}"
+
+    return "[Tool] Could not parse parameters from query."
+
+
+# ---------------------------------------------------------------------------
+# Memory strategy — conversation summarization
+# ---------------------------------------------------------------------------
+
+def _prepare_history(history: list[dict], max_turns: int = 3) -> list[dict]:
+    """
+    Prepare conversation history for the LLM.
+    Strategy:
+    - Keep the last `max_turns` exchanges verbatim (for immediate context).
+    - If the total history exceeds `max_turns * 2` messages,
+      prepend a synthetic "Summary of earlier conversation" message
+      to give the model compressed context of older turns.
+    - This avoids token overflow while preserving essential multi-turn references.
+    """
+    if not history:
+        return []
+
+    msgs = [m for m in history if m["role"] in ("user", "assistant")]
+    window = max_turns * 2
+
+    if len(msgs) <= window:
+        return msgs[-window:]
+
+    # Summarize older turns into a single synthetic message
+    older = msgs[:-window]
+    summary_parts = []
+    for m in older:
+        label = "Student" if m["role"] == "user" else "Assistant"
+        content = m.get("content", "")[:120]
+        summary_parts.append(f"{label}: {content}")
+    summary_text = "Previous conversation summary:\n" + "\n".join(summary_parts)
+
+    recent = msgs[-window:]
+    return [{"role": "user", "content": summary_text}] + recent
+
+
+# ---------------------------------------------------------------------------
+# Cost estimation
+# ---------------------------------------------------------------------------
+
+def _estimate_cost(tokens_in: int, tokens_out: int) -> float:
+    return (tokens_in / 1000 * COST_PER_1K_TOKENS_IN +
+            tokens_out / 1000 * COST_PER_1K_TOKENS_OUT)
+
+
+# ── Answer question ─────────────────────────────────────────────────────────
+
 def answer_question(
     question:       str,
     section_filter: Optional[str] = None,
     top_k:          int           = 8,
-    model:          str           = "DeepSeek R1",
+    model:          str           = "Nemotron 3 Super",
     history:        Optional[list[dict]] = None,
 ) -> RAGResult:
     """
     Full RAG pipeline: retrieve → ground → generate → return RAGResult.
     spec §5 + §7.
+
+    Memory strategy:
+      - Keeps last 3 conversation turns verbatim.
+      - Older turns are summarized into a single synthetic message
+        to preserve context without overflowing the token window.
+      - History is persisted to SQLite via app.py; no ephemeral summarization.
+
+    Tool integration:
+      - Calculator functions (fee, date, percentage) are invoked via
+        pattern matching before retrieval when the query matches.
+      - Tool results are injected into the retrieved CONTEXT so the model
+        can ground its answer on computed results.
     """
     t0 = time.perf_counter()
     history = history or []
@@ -414,6 +587,12 @@ def answer_question(
     from image_search import detect_image_request, search_images, _normalize_dept
     wants_images = detect_image_request(question)
     images = []
+
+    # Tool execution — run calculator tools before retrieval if detected
+    tool_result = None
+    tool_call = _detect_tool_call(question)
+    if tool_call:
+        tool_result = _run_tool(tool_call, question)
 
     # 1. Retrieve — use expanded query for embedding search, original for generation
     expanded_q = _expand_query(question)
@@ -428,29 +607,37 @@ def answer_question(
         effective_top_k = max(top_k, 20)
     chunks = retrieve(expanded_q, section_filter, effective_top_k)
     relevant = [c for c in chunks if c.score >= MIN_RELEVANCE_SCORE]
+    if not relevant:
+        # Never return an empty context when the vector store did produce
+        # candidates. Use the best matches so the model can still ground a
+        # refusal or answer on the closest available evidence.
+        relevant = chunks[: min(3, len(chunks))]
 
-    # 2. Build prompt context
+    # 2. Build prompt context (inject tool result if available)
     context_text = _format_context(relevant) if relevant else "(No relevant content found in the knowledge base.)"
-    history_text = _format_history(history)
+    if tool_result:
+        tool_label = "\n\n--- Tool Output ---\nThe following was computed by a calculator tool. Use it to answer the question:\n" if tool_result else ""
+        context_text += tool_label + (tool_result or "")
 
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         retrieved_chunks=context_text,
-        prior_turns=history_text,
-        question=question,
     )
 
     # 3. Generate
+    # Build messages list: system → compressed history (with summarization for long chats)
+    # → current user question.
     model_id = MODEL_MAP.get(model, "openai/gpt-4o-mini")
     client = _get_openai_client()
+
+    messages: list[dict] = [{"role": "system", "content": system_prompt}]
+    messages.extend(_prepare_history(history))
+    messages.append({"role": "user", "content": question})
 
     tokens_in = tokens_out = 0
     try:
         response = client.chat.completions.create(
             model=model_id,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": question},
-            ],
+            messages=messages,
             temperature=0.1,   # low temp for factual, grounded responses
             max_tokens=800,
         )
@@ -459,10 +646,32 @@ def answer_question(
             tokens_in  = response.usage.prompt_tokens
             tokens_out = response.usage.completion_tokens
     except Exception as e:
-        answer_text = (
-            f"I'm unable to answer right now due to an API error. "
-            f"Please try again shortly. (Error: {e})"
-        )
+        # If the preferred free model is unavailable, try the other free chat models
+        # before surfacing an error to the user.
+        answer_text = ""
+        if model_id in FALLBACK_MODELS:
+            for alt_model in FALLBACK_MODELS:
+                if alt_model == model_id:
+                    continue
+                try:
+                    response = client.chat.completions.create(
+                        model=alt_model,
+                        messages=messages,
+                        temperature=0.1,
+                        max_tokens=800,
+                    )
+                    answer_text = response.choices[0].message.content or ""
+                    if response.usage:
+                        tokens_in = response.usage.prompt_tokens
+                        tokens_out = response.usage.completion_tokens
+                    break
+                except Exception:
+                    continue
+        if not answer_text:
+            answer_text = (
+                f"I'm unable to answer right now due to an API error. "
+                f"Please try again shortly. (Error: {e})"
+            )
 
     latency = time.perf_counter() - t0
 
@@ -475,15 +684,28 @@ def answer_question(
             answer_text
         )
         if name_matches and dept:
-            # Search by each named faculty, deduplicate by url
             from image_search import search_images as _si
             seen_urls = set()
             for name in name_matches:
-                for img in _si(name + ' ' + (dept or ''), limit=2):
+                # Build a set of significant words from the queried name (skip titles)
+                titles = {'dr', 'mr', 'ms', 'mrs', 'prof'}
+                name_words = {w.lower().strip('.,') for w in name.split()
+                              if w.lower().strip('.,') not in titles and len(w) > 1}
+                for img in _si(name + ' ' + (dept or ''), limit=3):
                     url = img.get('url', '')
-                    if url and url not in seen_urls:
-                        images.append(img)
-                        seen_urls.add(url)
+                    if not url or url in seen_urls:
+                        continue
+                    # Relevance gate: image's name must share ≥1 significant word with query name
+                    img_name = (img.get('semantic_name') or img.get('context_heading') or '').lower()
+                    img_words = {w.strip('.,') for w in img_name.split() if len(w) > 1}
+                    if not (name_words & img_words):
+                        continue  # no word overlap — wrong person
+                    # Exclude event/award photos — they contain multiple titles (Mr/Ms/Dr appears >1 time)
+                    title_count = sum(1 for t in ['dr.', 'mr.', 'ms.', 'mrs.'] if t in img_name)
+                    if title_count > 1:
+                        continue  # group photo / award ceremony
+                    images.append(img)
+                    seen_urls.add(url)
                     if len(images) >= 5:
                         break
                 if len(images) >= 5:
@@ -509,11 +731,12 @@ def answer_question(
     return RAGResult(
         answer           = answer_text,
         citations        = _extract_citations(relevant),
-        images           = images,  # NEW: include image results
-        refused          = _detect_refusal(answer_text),
+        images           = images,
+        refused          = _detect_refusal(answer_text, _extract_citations(relevant)),
         latency_s        = round(latency, 2),
         tokens_in        = tokens_in,
         tokens_out       = tokens_out,
+        cost_usd         = _estimate_cost(tokens_in, tokens_out),
         chunks_retrieved = len(relevant),
         raw_chunks       = relevant,
     )
@@ -523,6 +746,37 @@ def answer_question(
 # Collection stats helper (used by app.py sidebar)
 # ---------------------------------------------------------------------------
 
+def embedding_healthy() -> bool:
+    return not _embedding_failed
+
+
+def validate_metadata_schema() -> list[str]:
+    """Check that the stored metadata has the expected fields. Returns warnings."""
+    warnings = []
+    try:
+        col = _get_collection()
+        sample = col.get(limit=50, include=["metadatas"])
+        for meta in sample.get("metadatas", []):
+            section = meta.get("section", "")
+            category = meta.get("category", "")
+            if section and category and section != category:
+                warnings.append(
+                    f"Mismatch: section='{section}' vs category='{category}'. "
+                    "Section filter may not work correctly."
+                )
+                break
+        pipeline_a = sum(1 for m in sample.get("metadatas", [])
+                         if m.get("pipeline") == "A")
+        pipeline_b = sum(1 for m in sample.get("metadatas", [])
+                         if m.get("pipeline") == "B")
+        if pipeline_b > 0 and pipeline_a == 0:
+            warnings.append("Only Pipeline B (raw crawl) chunks found. "
+                            "Consider running ingest_md.py for curated content.")
+    except Exception:
+        pass
+    return warnings
+
+
 def get_collection_stats() -> dict:
     """Return chunk count and sample section distribution for the sidebar."""
     try:
@@ -531,13 +785,18 @@ def get_collection_stats() -> dict:
         # Sample to get section distribution
         sample = col.get(limit=500, include=["metadatas"])
         section_counts: dict[str, int] = {}
+        pipeline_modes: set[str] = set()
         for meta in sample.get("metadatas", []):
             s = meta.get("section", "General")
             section_counts[s] = section_counts.get(s, 0) + 1
+            if meta.get("pipeline"):
+                pipeline_modes.add(str(meta.get("pipeline")))
         return {
             "total_chunks": count,
             "indexed": count > 0,
             "section_distribution": section_counts,
+            "pipelines": sorted(pipeline_modes),
+            "warnings": validate_metadata_schema(),
         }
     except Exception as e:
         return {"total_chunks": 0, "indexed": False, "error": str(e)}
