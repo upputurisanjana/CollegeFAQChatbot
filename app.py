@@ -40,7 +40,7 @@ SECTIONS = [
     "Entrepreneurship",
 ]
 
-GENERATION_MODELS = ["DeepSeek R1", "Gemma 3 12B", "Llama 3.1 8B"]
+GENERATION_MODELS = ["Free Router", "Gemma 4 31B", "Llama 3.3 70B"]
 
 QUICK_PROMPTS = [
     "What departments are offered?",
@@ -55,7 +55,6 @@ ALLOWED_DOMAIN          = "bvrithyderabad.edu.in"
 
 KB_DIR       = Path("bvrith_knowledge_base")
 SUMMARY_FILE = KB_DIR / "run_summary.json"
-CHROMA_DIR   = "./chroma_bvrith_v2"
 
 # ---------------------------------------------------------------------------
 # Page config — must be first Streamlit call
@@ -312,6 +311,69 @@ def strip_inline_citations(answer: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Render helpers
+# ---------------------------------------------------------------------------
+
+def render_hero(title: str, subtitle: str, pills: list[str], status_line: str):
+    pill_html = "".join(f'<span class="hero-pill">{safe(p)}</span>' for p in pills)
+    st.markdown(
+        f"""
+        <div class="hero">
+          <div class="hero-title">{safe(title)}</div>
+          <div class="hero-subtitle">{safe(subtitle)}</div>
+          <div class="hero-pillrow">{pill_html}</div>
+          <div style="margin-top:0.6rem;font-size:0.78rem;opacity:0.7">
+            <span class="status-dot"></span>{safe(status_line)}
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_message(msg: dict):
+    role = msg["role"]
+    content = msg.get("content", "")
+    citations = msg.get("citations", [])
+    images = msg.get("images", [])
+    refused = msg.get("refused", False)
+    no_prediction = msg.get("no_prediction", False)
+
+    label = "You" if role == "user" else "Assistant"
+    bubble_class = "chat-bubble user" if role == "user" else "chat-bubble assistant"
+
+    st.markdown(
+        f"""
+        <div class="{bubble_class}">
+          <div class="chat-label">{label}</div>
+          <div class="chat-text">{safe(content)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if citations and role == "assistant":
+        st.markdown(
+            f"""<div class="citation-box"><strong>Sources:</strong><br>{'<br>'.join(safe(c) for c in citations)}</div>""",
+            unsafe_allow_html=True,
+        )
+
+    if images and role == "assistant":
+        cols = st.columns(min(len(images), 5))
+        for col, img in zip(cols, images[:5]):
+            col.image(img.get("url", ""), use_container_width=True)
+
+    if role == "assistant":
+        badges = []
+        if refused:
+            badges.append('<span class="badge badge-red">Refused</span>')
+        if no_prediction:
+            badges.append('<span class="badge badge-amber">No Prediction</span>')
+        if badges:
+            st.markdown(" ".join(badges), unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
 # KB helpers
 # ---------------------------------------------------------------------------
 
@@ -333,6 +395,9 @@ def get_chroma_stats() -> dict:
     except Exception as e:
         return {"total_chunks": 0, "indexed": False, "error": str(e)}
 
+
+crawl_date = load_run_summary().get("crawl_date", "latest crawl")
+chunk_count = get_chroma_stats().get("total_chunks", 0)
 
 # ---------------------------------------------------------------------------
 # Session state

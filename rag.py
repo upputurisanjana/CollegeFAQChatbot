@@ -25,6 +25,7 @@ Environment variables (from .env):
 
 import os
 import re
+import json
 import math
 import hashlib
 import time
@@ -92,9 +93,9 @@ ALLOWED_DOMAIN   = "bvrithyderabad.edu.in"
 
 # Model name → OpenRouter model id
 MODEL_MAP = {
-    "DeepSeek R1":        "deepseek/deepseek-r1",           # primary — free tier
-    "Gemma 3 12B":        "google/gemma-3-12b-it:free",     # slightly higher — free
-    "Llama 3.1 8B":       "meta-llama/llama-3.1-8b-instruct:free",  # fast & free
+    "Free Router":        "openrouter/free",                         # auto-selects best free model
+    "Gemma 4 31B":        "google/gemma-4-31b-it:free",              # fast & free
+    "Llama 3.3 70B":      "meta-llama/llama-3.3-70b-instruct:free",  # large & capable
 }
 
 # Minimum cosine similarity score to consider a chunk "relevant" (0-1 space).
