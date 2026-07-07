@@ -38,9 +38,9 @@ load_dotenv()
 # Config
 # ---------------------------------------------------------------------------
 
-JUDGE_MODEL      = "google/gemma-3-12b-it:free"        # must differ from chatbot
-GENERATOR_MODEL  = "google/gemma-3-12b-it:free"        # builds test cases
-CHATBOT_MODEL    = "DeepSeek R1"                        # the system under test
+JUDGE_MODEL      = "meta-llama/llama-3.3-70b-instruct:free"   # must differ from chatbot
+GENERATOR_MODEL  = "google/gemma-4-31b-it:free"              # builds test cases
+CHATBOT_MODEL    = "Free Router"                              # the system under test
 
 LATENCY_SLA_S    = 10.0  # spec §8 Dim 06 performance SLA
 
