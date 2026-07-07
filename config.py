@@ -13,8 +13,8 @@ KB_DIR            = BASE_DIR / "bvrith_knowledge_base"
 SUMMARY_FILE      = KB_DIR / "run_summary.json"
 CHUNKS_STRUCTURED = KB_DIR / "chunks_structured.jsonl"
 CHUNKS_RAW        = KB_DIR / "chunks.jsonl"
-CHROMA_DIR        = str(BASE_DIR / "chroma_bvrith_v2")
-COLLECTION_NAME   = "bvrith_faq"
+CHROMA_DIR        = str(BASE_DIR / "chroma_db")
+COLLECTION_NAME   = "langchain"
 DB_PATH           = str(BASE_DIR / "chat_history.db")
 
 # ── Embedding ────────────────────────────────────────────────────────────────
@@ -26,12 +26,14 @@ LOCAL_EMBED_DIM   = 384
 # ── Generation models (display name → OpenRouter model id) ───────────────────
 # NOTE: Free tiers on OpenRouter change frequently. Update when models get deprecated.
 MODEL_MAP = {
-    "Nemotron 3 Super":     "nvidia/nemotron-3-super-120b-a12b:free",
+    "DeepSeek R1":          "deepseek/deepseek-r1:free",
+    "Gemma 3 12B":          "google/gemma-3-12b-it:free",
+    "Llama 3.1 8B":         "meta-llama/llama-3.1-8b-instruct:free",
 }
 FALLBACK_MODELS = [
-    "nvidia/nemotron-3-super-120b-a12b:free",
+    "openrouter/free",
     "meta-llama/llama-3.3-70b-instruct:free",
-    "nousresearch/hermes-3-llama-3.1-405b:free",
+    "google/gemma-3-12b-it:free",
 ]
 
 # ── Retrieval ────────────────────────────────────────────────────────────────

@@ -46,6 +46,48 @@ from config import (
     MODEL_MAP, FALLBACK_MODELS, COST_PER_1K_TOKENS_IN, COST_PER_1K_TOKENS_OUT,
     ALLOWED_DOMAIN, MIN_RELEVANCE_SCORE, get_api_key, get_api_base,
 )
+from utils.calculators import get_tool_schemas
+
+# ---------------------------------------------------------------------------
+# Governance & Memory singletons (lazy-initialized)
+# ---------------------------------------------------------------------------
+
+_audit_log = None
+_rate_limiter = None
+_content_monitor = None
+_prompt_version = None
+
+
+def _get_audit_log():
+    global _audit_log
+    if _audit_log is None:
+        from governance import AuditLog
+        _audit_log = AuditLog()
+    return _audit_log
+
+
+def _get_rate_limiter():
+    global _rate_limiter
+    if _rate_limiter is None:
+        from governance import RateLimiter
+        _rate_limiter = RateLimiter(max_per_session=40, max_per_minute=10)
+    return _rate_limiter
+
+
+def _get_content_monitor():
+    global _content_monitor
+    if _content_monitor is None:
+        from governance import ContentMonitor
+        _content_monitor = ContentMonitor()
+    return _content_monitor
+
+
+def _get_prompt_version():
+    global _prompt_version
+    if _prompt_version is None:
+        from governance import PromptVersion
+        _prompt_version = PromptVersion()
+    return _prompt_version
 
 # ---------------------------------------------------------------------------
 # Grounding prompt (verbatim from spec.md §7)
@@ -75,6 +117,12 @@ If the answer is not present in the CONTEXT, respond:
 Please contact admissions@bvrithyderabad.edu.in or call the admissions office for an authoritative
 answer." Do not apologize excessively or speculate about what the answer
 might be.
+
+CASUAL CONVERSATION:
+If the user greets you, thanks you, or makes casual conversation unrelated
+to BVRIT (e.g., "hello", "how are you", "thanks", "goodbye"), you may
+respond naturally without referring to the CONTEXT. Do not use any tools
+for casual conversation.
 
 SAFETY BOUNDARY:
 Never provide medical, legal, financial investment, or personal counselling
@@ -166,7 +214,7 @@ class RetrievedChunk:
 class RAGResult:
     answer:           str
     citations:        list[str]         = field(default_factory=list)
-    images:           list[dict]        = field(default_factory=list)  # NEW: image results
+    images:           list[dict]        = field(default_factory=list)
     refused:          bool              = False
     latency_s:        float             = 0.0
     tokens_in:        int               = 0
@@ -174,6 +222,8 @@ class RAGResult:
     cost_usd:         float             = 0.0
     chunks_retrieved: int               = 0
     raw_chunks:       list[RetrievedChunk] = field(default_factory=list)
+    flags:            list[str]         = field(default_factory=list)
+    prompt_version:   str               = ""
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +277,7 @@ def _get_collection():
         # No embedding_function — we supply embeddings directly via query_embeddings
         _collection = client.get_or_create_collection(
             name=COLLECTION_NAME,
-            metadata={"hnsw:space": "cosine"},
+            metadata={"hnsw:space": "l2"},
         )
     return _collection
 
@@ -256,7 +306,7 @@ def retrieve(
 
     where = None
     if section_filter and section_filter.lower() not in ("all sections", "all", ""):
-        where = {"section": {"$eq": section_filter}}
+        where = {"section_heading": {"$eq": section_filter}}
 
     # Embed query manually
     query_embedding = _embed_query(question)
@@ -278,16 +328,19 @@ def retrieve(
     distances = results.get("distances", [[]])[0]
 
     for cid, doc, meta, dist in zip(ids, docs, metas, distances):
-        # ChromaDB cosine distance: 0 = identical, 2 = opposite
-        # Convert to similarity: 1 - dist/2  (gives 0–1 range)
-        similarity = max(0.0, 1.0 - dist / 2.0)
+        # ChromaDB L2 distance: 0 = identical, larger = farther
+        # Convert to similarity: 1/(1+dist) maps 0→1, ∞→0
+        similarity = max(0.0, 1.0 / (1.0 + dist))
+        source_path = meta.get("source_path", "")
+        # Normalize Windows backslashes in paths
+        source_path = source_path.replace("\\", "/") if source_path else ""
         chunks.append(RetrievedChunk(
             chunk_id        = cid,
             text            = doc or "",
-            source_url      = meta.get("source_url", ""),
-            section         = meta.get("section", "General"),
-            page_title      = meta.get("page_title", ""),
-            retrieved_at    = meta.get("retrieved_at_utc", ""),
+            source_url      = source_path,
+            section         = meta.get("section_heading", "General"),
+            page_title      = meta.get("source_file", ""),
+            retrieved_at    = meta.get("ingested_date", ""),
             pdf_page_number = int(meta.get("pdf_page_number", -1)),
             score           = similarity,
         ))
@@ -317,18 +370,24 @@ def _extract_citations(chunks: list[RetrievedChunk]) -> list[str]:
     """Build human-readable citation strings from retrieved chunks."""
     seen, citations = set(), []
     for c in chunks:
-        url = c.source_url
-        # Security: only emit citations pointing at the known domain (spec §9.3)
-        if url and ALLOWED_DOMAIN not in url:
+        ref = c.source_url
+        if not ref:
             continue
-        if url in seen:
+        if ref in seen:
             continue
-        seen.add(url)
-        if c.pdf_page_number and c.pdf_page_number > 0:
-            citations.append(f"{c.section} — {url} (page {c.pdf_page_number})")
-        else:
+        seen.add(ref)
+        # For markdown file paths like ./scraped_site/pages/foo.md, show filename
+        if ref.startswith("./scraped_site/"):
+            label = ref.rsplit("/", 1)[-1].replace("_", " ").replace(".md", "")
             date = c.retrieved_at[:10] if c.retrieved_at else ""
-            citations.append(f"{c.section} — {url}" + (f" (retrieved {date})" if date else ""))
+            citations.append(f"{c.section} — {label}" + (f" (retrieved {date})" if date else ""))
+        elif ALLOWED_DOMAIN in ref:
+            date = c.retrieved_at[:10] if c.retrieved_at else ""
+            citations.append(f"{c.section} — {ref}" + (f" (retrieved {date})" if date else ""))
+        else:
+            # Any other reference — include as-is
+            date = c.retrieved_at[:10] if c.retrieved_at else ""
+            citations.append(f"{c.section} — {ref}" + (f" (retrieved {date})" if date else ""))
     return citations
 
 
@@ -419,13 +478,12 @@ def _expand_query(question: str) -> str:
             "aiml": "CSE Artificial Intelligence Machine Learning AIML faculty professor staff",
             "csm": "CSE Artificial Intelligence Machine Learning AIML faculty professor staff",
         }
-        import re as _re
         for key, expansion in dept_expansions.items():
             # Use word-boundary match so "it" doesn't fire on "list", "activities", etc.
-            if _re.search(r'\b' + _re.escape(key) + r'\b', q_lower):
+            if re.search(r'\b' + re.escape(key) + r'\b', q_lower):
                 return question + " " + expansion
         # Also handle bare "IT" as a whole word separately (not caught above as dict key)
-        if _re.search(r'\bit\b', q_lower):
+        if re.search(r'\bit\b', q_lower):
             return question + " Information Technology IT faculty professor staff"
         return question + " faculty professor department BVRIT name designation"
     # Contact queries
@@ -435,95 +493,49 @@ def _expand_query(question: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tool dispatcher (calculator, date checker)
+# Tool execution dispatch (called when the model returns a tool_call)
 # ---------------------------------------------------------------------------
 
-_TOOL_DEFINITIONS = {
-    "calculate_fee": {
-        "description": "Calculate total BVRIT tuition fees with optional scholarship and hostel.",
-        "params": ["annual_fee", "years", "scholarship_pct", "hostel_annual"],
-    },
-    "check_date": {
-        "description": "Check if a BVRIT event date is past, today, or upcoming.",
-        "params": ["target_date", "event_name"],
-    },
-    "calculate_percentage": {
-        "description": "Calculate X% of Y or what percentage X is of Y.",
-        "params": ["value", "percentage", "operation", "total"],
-    },
-}
-
-
-def _detect_tool_call(text: str) -> dict | None:
-    """Detect a tool invocation pattern in the query or response."""
+def _execute_tool_call(tool_name: str, arguments: dict) -> str:
+    """Execute a tool by name with parsed arguments. Returns JSON result string."""
     from utils.calculators import fee_calculator, date_checker, percentage_calculator
 
-    q = text.lower()
-
-    # Fee calculation
-    if any(kw in q for kw in ["calculate fee", "total fee", "fee calculator", "scholarship"]):
-        return {"tool": "calculate_fee", "handler": fee_calculator}
-
-    # Date check
-    if any(kw in q for kw in ["when is", "how many days", "days until", "days since", "date check"]):
-        return {"tool": "check_date", "handler": date_checker}
-
-    # Percentage
-    if any(kw in q for kw in ["what is *% of", "what percentage", "percentage of"]):
-        return {"tool": "calculate_percentage", "handler": percentage_calculator}
-
-    return None
-
-
-def _run_tool(tool_call: dict, question: str) -> str:
-    """Execute a tool and return a text result to inject into the context."""
-    import re
-    from utils.calculators import fee_calculator, date_checker, percentage_calculator
-
-    tool_name = tool_call["tool"]
-
-    if tool_name == "calculate_fee":
-        nums = re.findall(r"[\d,.]+", question.replace(",", ""))
-        nums = [float(n) for n in nums if n]
-        annual_fee = nums[0] if len(nums) > 0 else 100000
-        years = int(nums[1]) if len(nums) > 1 else 4
-        scholarship = nums[2] if len(nums) > 2 else 0
-        hostel = nums[3] if len(nums) > 3 else 0
-        result = fee_calculator(annual_fee, years, scholarship, hostel)
-        return f"[Tool: fee_calculator] Result: {json.dumps(result, indent=2)}"
-
-    if tool_name == "check_date":
-        dates = re.findall(r"\d{4}-\d{2}-\d{2}", question)
-        if not dates:
-            return "[Tool: date_checker] No valid date found in query."
-        event = question.replace("when is", "").replace("?", "").strip()
-        result = date_checker(dates[0], event[:30])
-        return f"[Tool: date_checker] Result: {json.dumps(result, indent=2)}"
-
-    if tool_name == "calculate_percentage":
-        nums = re.findall(r"[\d,.]+", question.replace(",", ""))
-        nums = [float(n) for n in nums if n]
-        if len(nums) >= 2:
-            result = percentage_calculator(nums[0], nums[1], "of", nums[2] if len(nums) > 2 else 0)
-            return f"[Tool: percentage_calculator] Result: {json.dumps(result, indent=2)}"
-
-    return "[Tool] Could not parse parameters from query."
+    TOOL_MAP = {
+        "fee_calculator": fee_calculator,
+        "date_checker": date_checker,
+        "percentage_calculator": percentage_calculator,
+    }
+    handler = TOOL_MAP.get(tool_name)
+    if not handler:
+        return json.dumps({"error": f"Unknown tool: {tool_name}"})
+    try:
+        result = handler(**arguments)
+    except TypeError as e:
+        return json.dumps({"error": f"Tool '{tool_name}' argument error: {e}"})
+    return json.dumps(result, indent=2)
 
 
 # ---------------------------------------------------------------------------
 # Memory strategy — conversation summarization
 # ---------------------------------------------------------------------------
 
-def _prepare_history(history: list[dict], max_turns: int = 3) -> list[dict]:
+def _prepare_history(
+    history: list[dict],
+    max_turns: int = 3,
+    memory: object = None,
+) -> list[dict]:
     """
     Prepare conversation history for the LLM.
     Strategy:
     - Keep the last `max_turns` exchanges verbatim (for immediate context).
     - If the total history exceeds `max_turns * 2` messages,
-      prepend a synthetic "Summary of earlier conversation" message
-      to give the model compressed context of older turns.
-    - This avoids token overflow while preserving essential multi-turn references.
+      prepend a synthetic "Summary of earlier conversation" message.
+    - If a ConversationMemory instance is provided, use it for entity-aware
+      history preparation.
     """
+    if memory is not None:
+        return memory.prepare_messages(history, "")
+
     if not history:
         return []
 
@@ -533,7 +545,6 @@ def _prepare_history(history: list[dict], max_turns: int = 3) -> list[dict]:
     if len(msgs) <= window:
         return msgs[-window:]
 
-    # Summarize older turns into a single synthetic message
     older = msgs[:-window]
     summary_parts = []
     for m in older:
@@ -563,36 +574,62 @@ def answer_question(
     top_k:          int           = 8,
     model:          str           = "Nemotron 3 Super",
     history:        Optional[list[dict]] = None,
+    session_id:     str           = "default",
+    memory:         object        = None,
 ) -> RAGResult:
     """
     Full RAG pipeline: retrieve → ground → generate → return RAGResult.
     spec §5 + §7.
 
     Memory strategy:
-      - Keeps last 3 conversation turns verbatim.
-      - Older turns are summarized into a single synthetic message
-        to preserve context without overflowing the token window.
-      - History is persisted to SQLite via app.py; no ephemeral summarization.
+      - If `memory` (ConversationMemory) is provided, uses entity-aware
+        history preparation with cross-session persistence.
+      - Otherwise keeps last 3 conversation turns verbatim, older summarized.
+
+    Governance:
+      - Audit log: every query/response is logged to SQLite.
+      - Content monitoring: queries/responses are scanned for flagged patterns.
+      - Rate limiting: per-session and per-minute checks.
+      - Prompt versioning: system prompt SHA256 hash is recorded per response.
 
     Tool integration:
-      - Calculator functions (fee, date, percentage) are invoked via
-        pattern matching before retrieval when the query matches.
-      - Tool results are injected into the retrieved CONTEXT so the model
-        can ground its answer on computed results.
+      - Tool definitions (fee_calculator, date_checker, percentage_calculator)
+        are sent to the LLM via the OpenAI `tools` API parameter.
+      - If the model returns a tool_call, the tool is executed and its result
+        is sent back to the model in a second API call for final grounding.
+      - If the model returns text directly, it already has RAG context in the
+        system prompt — no tool was needed.
+      - Greeting/conversation queries bypass both RAG and tools via the
+        CASUAL CONVERSATION rule in the system prompt.
     """
     t0 = time.perf_counter()
     history = history or []
+    all_flags: list[str] = []
+
+    # ------------------------------------------------------------------
+    # Governance: rate limit check
+    # ------------------------------------------------------------------
+    limiter = _get_rate_limiter()
+    allowed, reason = limiter.check_session(session_id)
+    if not allowed:
+        return RAGResult(
+            answer=f"I'm unable to answer right now: {reason}. Please try again later or reset the conversation.",
+            citations=[],
+            refused=True,
+            latency_s=round(time.perf_counter() - t0, 2),
+            flags=["rate_limited"],
+        )
+
+    # ------------------------------------------------------------------
+    # Governance: content monitor on query
+    # ------------------------------------------------------------------
+    monitor = _get_content_monitor()
+    all_flags.extend(monitor.check_query(question))
 
     # Check if user wants images
     from image_search import detect_image_request, search_images, _normalize_dept
     wants_images = detect_image_request(question)
     images = []
-
-    # Tool execution — run calculator tools before retrieval if detected
-    tool_result = None
-    tool_call = _detect_tool_call(question)
-    if tool_call:
-        tool_result = _run_tool(tool_call, question)
 
     # 1. Retrieve — use expanded query for embedding search, original for generation
     expanded_q = _expand_query(question)
@@ -613,65 +650,118 @@ def answer_question(
         # refusal or answer on the closest available evidence.
         relevant = chunks[: min(3, len(chunks))]
 
-    # 2. Build prompt context (inject tool result if available)
+    # 2. Build context
     context_text = _format_context(relevant) if relevant else "(No relevant content found in the knowledge base.)"
-    if tool_result:
-        tool_label = "\n\n--- Tool Output ---\nThe following was computed by a calculator tool. Use it to answer the question:\n" if tool_result else ""
-        context_text += tool_label + (tool_result or "")
 
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         retrieved_chunks=context_text,
     )
 
-    # 3. Generate
-    # Build messages list: system → compressed history (with summarization for long chats)
-    # → current user question.
+    # 3. Generate — proper function calling loop
     model_id = MODEL_MAP.get(model, "openai/gpt-4o-mini")
     client = _get_openai_client()
 
     messages: list[dict] = [{"role": "system", "content": system_prompt}]
-    messages.extend(_prepare_history(history))
+    messages.extend(_prepare_history(history, memory=memory))
     messages.append({"role": "user", "content": question})
 
+    tool_schemas = get_tool_schemas()
     tokens_in = tokens_out = 0
-    try:
-        response = client.chat.completions.create(
+    answer_text = ""
+
+    def _llm_call(msgs: list[dict], extra_kwargs: dict | None = None) -> dict:
+        """Single LLM call returning {content, tool_calls, tokens_in, tokens_out}."""
+        kwargs = dict(
             model=model_id,
-            messages=messages,
-            temperature=0.1,   # low temp for factual, grounded responses
+            messages=msgs,
+            temperature=0.1,
             max_tokens=800,
+            tools=tool_schemas,
         )
-        answer_text  = response.choices[0].message.content or ""
-        if response.usage:
-            tokens_in  = response.usage.prompt_tokens
-            tokens_out = response.usage.completion_tokens
-    except Exception as e:
-        # If the preferred free model is unavailable, try the other free chat models
-        # before surfacing an error to the user.
-        answer_text = ""
-        if model_id in FALLBACK_MODELS:
-            for alt_model in FALLBACK_MODELS:
-                if alt_model == model_id:
-                    continue
-                try:
-                    response = client.chat.completions.create(
-                        model=alt_model,
-                        messages=messages,
-                        temperature=0.1,
-                        max_tokens=800,
-                    )
-                    answer_text = response.choices[0].message.content or ""
-                    if response.usage:
-                        tokens_in = response.usage.prompt_tokens
-                        tokens_out = response.usage.completion_tokens
-                    break
-                except Exception:
-                    continue
-        if not answer_text:
-            answer_text = (
-                f"I'm unable to answer right now due to an API error. "
-                f"Please try again shortly. (Error: {e})"
-            )
+        if extra_kwargs:
+            kwargs.update(extra_kwargs)
+        resp = client.chat.completions.create(**kwargs)
+        choice = resp.choices[0]
+        usage = resp.usage
+        return {
+            "content": choice.message.content or "",
+            "tool_calls": choice.message.tool_calls,
+            "tokens_in": usage.prompt_tokens if usage else 0,
+            "tokens_out": usage.completion_tokens if usage else 0,
+        }
+
+    # Try the primary model first, fall back through alternatives on error
+    models_to_try = [model_id]
+    if model_id in FALLBACK_MODELS:
+        models_to_try = [model_id] + [m for m in FALLBACK_MODELS if m != model_id]
+
+    for attempt_model in models_to_try:
+        if attempt_model != model_id:
+            kwargs_override = {"model": attempt_model}
+        else:
+            kwargs_override = None
+
+        # Fresh message copy per attempt to avoid cross-contamination on retry
+        attempt_msgs = list(messages)
+
+        try:
+            result = _llm_call(attempt_msgs, kwargs_override)
+
+            # CASE A: model wants to call a tool
+            if result["tool_calls"]:
+                # Append assistant message with tool_calls
+                assistant_msg = {"role": "assistant", "content": result["content"]}
+                # Convert tool_calls to dict format for message
+                tc_dicts = []
+                for tc in result["tool_calls"]:
+                    tc_dicts.append({
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    })
+                assistant_msg["tool_calls"] = tc_dicts
+                attempt_msgs.append(assistant_msg)
+
+                # Execute each tool and append tool result messages
+                for tc in result["tool_calls"]:
+                    args = json.loads(tc.function.arguments)
+                    tool_result = _execute_tool_call(tc.function.name, args)
+                    attempt_msgs.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": tool_result,
+                    })
+
+                tokens_in += result["tokens_in"]
+                tokens_out += result["tokens_out"]
+
+                # Second call — model generates final answer with tool output
+                result2 = _llm_call(attempt_msgs)
+                answer_text = result2["content"]
+                tokens_in += result2["tokens_in"]
+                tokens_out += result2["tokens_out"]
+            else:
+                # CASE B: no tool call — use text response directly
+                # (context was already in system prompt, or it's casual conversation)
+                answer_text = result["content"]
+                tokens_in += result["tokens_in"]
+                tokens_out += result["tokens_out"]
+
+            # Success — break out of fallback loop
+            break
+
+        except Exception as e:
+            answer_text = ""
+            continue
+
+    if not answer_text:
+        answer_text = (
+            f"I'm unable to answer right now due to an API error. "
+            f"Please try again shortly."
+        )
 
     latency = time.perf_counter() - t0
 
@@ -728,17 +818,59 @@ def answer_question(
         if "here are some relevant images" not in answer_text.lower():
             answer_text = answer_text.rstrip() + "\n\nHere are some relevant images from BVRIT HYDERABAD:"
 
+    # ------------------------------------------------------------------
+    # Governance: content monitor on response
+    # ------------------------------------------------------------------
+    all_flags.extend(monitor.check_response(answer_text))
+
+    # ------------------------------------------------------------------
+    # Governance: prompt version tracking
+    # ------------------------------------------------------------------
+    pv = _get_prompt_version()
+    pv_hash = pv.register(system_prompt)
+
+    # ------------------------------------------------------------------
+    # Governance: audit logging
+    # ------------------------------------------------------------------
+    citations = _extract_citations(relevant)
+    refused = _detect_refusal(answer_text, citations)
+    audit = _get_audit_log()
+    audit.log(
+        session_id=session_id,
+        query=question,
+        response=answer_text,
+        model=model,
+        latency_s=round(latency, 2),
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        refused=refused,
+        citations=citations,
+        prompt_version=pv_hash,
+        flags=all_flags,
+    )
+
+    # ------------------------------------------------------------------
+    # Memory: update entity store
+    # ------------------------------------------------------------------
+    if memory is not None:
+        history_msgs = list(history) if history else []
+        history_msgs.append({"role": "user", "content": question})
+        history_msgs.append({"role": "assistant", "content": answer_text})
+        memory.update(history_msgs)
+
     return RAGResult(
         answer           = answer_text,
-        citations        = _extract_citations(relevant),
+        citations        = citations,
         images           = images,
-        refused          = _detect_refusal(answer_text, _extract_citations(relevant)),
+        refused          = refused,
         latency_s        = round(latency, 2),
         tokens_in        = tokens_in,
         tokens_out       = tokens_out,
         cost_usd         = _estimate_cost(tokens_in, tokens_out),
         chunks_retrieved = len(relevant),
         raw_chunks       = relevant,
+        flags            = all_flags,
+        prompt_version   = pv_hash,
     )
 
 

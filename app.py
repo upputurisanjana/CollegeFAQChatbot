@@ -6,6 +6,7 @@ Run:  streamlit run app.py
 Requires: ingest.py run first (python ingest.py) to build ./chroma_bvrith
 """
 
+import hashlib
 import html
 import json
 import os
@@ -34,7 +35,8 @@ SECTIONS = [
     "Contact",
 ]
 
-GENERATION_MODELS = ["DeepSeek R1", "Gemma 3 12B", "Llama 3.1 8B"]
+from config import MODEL_MAP
+GENERATION_MODELS = list(MODEL_MAP.keys())
 
 QUICK_PROMPTS = [
     "What departments are offered?",
@@ -47,9 +49,8 @@ MAX_INPUT_CHARS       = 500   # spec §9.1 — prompt-based DoS guard
 MAX_QUERIES_PER_SESSION = 40  # spec §9.4 — per-session cost cap
 ALLOWED_DOMAIN        = "bvrithyderabad.edu.in"  # spec §9.3 — citation spoofing guard
 
-KB_DIR     = Path("bvrith_knowledge_base")
+from config import KB_DIR, CHROMA_DIR
 SUMMARY_FILE = KB_DIR / "run_summary.json"
-CHROMA_DIR = "./chroma_bvrith"
 
 # ---------------------------------------------------------------------------
 # Page config (must be first Streamlit call)
@@ -199,6 +200,18 @@ def init_state():
 init_state()
 
 # ---------------------------------------------------------------------------
+# Session identity & Memory
+# ---------------------------------------------------------------------------
+
+if "session_id" not in st.session_state:
+    raw = f"{time.time()}-{os.urandom(8).hex()}"
+    st.session_state.session_id = hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+if "memory" not in st.session_state:
+    from memory import ConversationMemory
+    st.session_state.memory = ConversationMemory(st.session_state.session_id)
+
+# ---------------------------------------------------------------------------
 # Sidebar  (spec §6.1 — every field)
 # ---------------------------------------------------------------------------
 
@@ -289,6 +302,20 @@ with st.sidebar:
     st.caption(f"Queries this session: {queries_used}/{MAX_QUERIES_PER_SESSION}")
 
     st.divider()
+
+    # ── Remembered context (from memory module) ──
+    st.markdown("### 🧠 Remembered Context")
+    memory = st.session_state.get("memory")
+    if memory:
+        blurb = memory.entities.get_context_blurb()
+        if blurb:
+            st.caption(blurb)
+        else:
+            st.caption("No context remembered yet.")
+    else:
+        st.caption("Memory not initialized.")
+
+    st.divider()
     if st.button("🔄 Reset Conversation", use_container_width=True):
         st.session_state.messages = []
         st.session_state.last_latency   = None
@@ -302,7 +329,7 @@ with st.sidebar:
 # Tabs
 # ---------------------------------------------------------------------------
 
-tab_chat, tab_eval = st.tabs(["💬 Chat", "📋 Evaluation Dashboard"])
+tab_chat, tab_eval, tab_admin = st.tabs(["💬 Chat", "📋 Evaluation Dashboard", "🔐 Admin"])
 
 # ===========================================================================
 # TAB 1 — CHAT
@@ -447,6 +474,8 @@ with tab_chat:
                                 m for m in st.session_state.messages[:-1]
                                 if m["role"] in ("user", "assistant")
                             ],
+                            session_id=st.session_state.session_id,
+                            memory=st.session_state.memory,
                         )
                         # Update last-query metrics in sidebar
                         st.session_state.last_latency    = result.latency_s
@@ -634,3 +663,81 @@ with tab_eval:
             file_name="bvrit_eval_report.json",
             mime="application/json",
         )
+
+
+# ===========================================================================
+# TAB 3 — ADMIN DASHBOARD  (governance + audit)
+# ===========================================================================
+
+with tab_admin:
+    st.markdown("## 🔐 Admin Dashboard")
+    st.caption("Governance, audit logging, and usage statistics.")
+
+    try:
+        from governance import AuditLog, RateLimiter
+        audit = AuditLog()
+        stats = audit.get_stats()
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Total Queries", stats["total_queries"])
+        col2.metric("Today", stats["today_queries"])
+        col3.metric("Avg Latency", f"{stats['avg_latency_s']:.2f}s")
+        col4.metric("Total Tokens", stats["total_tokens"])
+
+        st.divider()
+
+        # Model distribution
+        st.markdown("### 📊 Model Distribution")
+        dist = stats.get("model_distribution", {})
+        if dist:
+            for model_name, count in dist.items():
+                st.caption(f"{model_name}: {count} queries")
+        else:
+            st.caption("No data yet.")
+
+        st.divider()
+
+        # Rate limit info
+        st.markdown("### ⚡ Rate Limiting")
+        limiter = RateLimiter(max_per_session=40, max_per_minute=10)
+        usage = limiter.get_usage(st.session_state.get("session_id", "default"))
+        st.caption(f"Session queries: {usage['session_queries']} / {usage['max_per_session']}")
+        st.caption(f"Remaining: {usage['remaining']}")
+        st.caption("Max per minute: 10")
+
+        st.divider()
+
+        # Recent audit log
+        st.markdown("### 📋 Recent Activity")
+        recent = audit.get_recent(limit=20)
+        if recent:
+            for entry in recent:
+                flags = json.loads(entry.get("flags", "[]"))
+                flag_badge = ""
+                if flags:
+                    flag_badge = f' <span class="badge badge-amber">{" ".join(flags)}</span>'
+                st.markdown(
+                    f"**{entry['timestamp'][:19]}** | {entry['model']} | "
+                    f"{entry['latency_s']:.1f}s | {entry['tokens_in'] + entry['tokens_out']} tokens"
+                    f"{flag_badge}",
+                    unsafe_allow_html=True,
+                )
+                st.caption(f"Q: {entry['query'][:120]}")
+                st.caption(f"A: {entry['response'][:120]}")
+                st.markdown("---")
+        else:
+            st.caption("No queries logged yet. Start chatting to see activity here.")
+
+        st.divider()
+
+        # Prompt version
+        st.markdown("### 📝 Prompt Version")
+        last_entry = recent[0] if recent else None
+        if last_entry and last_entry.get("prompt_version"):
+            st.caption(f"Last used prompt version: `{last_entry['prompt_version']}`")
+            st.caption("Prompt versions are SHA256 hashes of the system prompt template.")
+        else:
+            st.caption("No prompt version tracked yet.")
+
+    except Exception as e:
+        st.warning(f"Admin dashboard unavailable: {e}")

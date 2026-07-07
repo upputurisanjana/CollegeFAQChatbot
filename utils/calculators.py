@@ -4,8 +4,141 @@ calculators.py — Fee, date, and percentage utilities for BVRIT chatbot
 Extracted from the disconnected tools.py function-calling chatbot.
 """
 
-import json
 from datetime import date, datetime
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass(frozen=True)
+class ToolSchema:
+    name: str
+    description: str
+    parameters: dict[str, Any]
+
+
+FEE_CALCULATOR_SCHEMA = ToolSchema(
+    name="fee_calculator",
+    description=(
+        "Compute total BVRIT tuition and optional hostel cost across multiple "
+        "years, including scholarship discount when the user asks for fee totals. "
+        "Use ONLY when the user explicitly asks for a numeric fee calculation "
+        "(e.g. 'total 4-year cost', 'fee with scholarship', 'tuition + hostel'). "
+        "Do NOT use for: date/deadline checks, percentage-only queries unrelated "
+        "to fees, or simple lookup of annual fee figures (those are RAG queries)."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "annual_fee": {
+                "type": "number",
+                "description": "Annual tuition fee before scholarship.",
+            },
+            "years": {
+                "type": "number",
+                "description": "Programme duration in years, usually 4 for B.Tech.",
+            },
+            "scholarship_pct": {
+                "type": "number",
+                "description": "Scholarship discount percentage from 0 to 100.",
+            },
+            "hostel_annual": {
+                "type": "number",
+                "description": "Optional hostel fee per year.",
+            },
+        },
+        "required": ["annual_fee", "years", "scholarship_pct"],
+    },
+)
+
+DATE_CHECKER_SCHEMA = ToolSchema(
+    name="date_checker",
+    description=(
+        "Compare a BVRIT deadline, exam date, or event date against today's "
+        "date and report whether it is past, today, or upcoming with days remaining. "
+        "Use ONLY when the user asks about time relative to now "
+        "(e.g. 'is the deadline past?', 'how many days until exams?', 'when is counselling?'). "
+        "Do NOT use for: fee calculations, percentage calculations, or simple "
+        "lookup of dates from documents (those are RAG queries)."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "target_date": {
+                "type": "string",
+                "description": "Date in YYYY-MM-DD format.",
+            },
+            "event_name": {
+                "type": "string",
+                "description": "Short label for the event being checked.",
+            },
+        },
+        "required": ["target_date", "event_name"],
+    },
+)
+
+PERCENTAGE_CALCULATOR_SCHEMA = ToolSchema(
+    name="percentage_calculator",
+    description=(
+        "Compute a percentage of a value or determine what percentage one "
+        "number is of another when the user asks for a direct percentage calculation. "
+        "Use ONLY when the user provides explicit numbers for percentage math "
+        "(e.g. 'what is 15% of 120000', 'what percentage is 5000 of 100000'). "
+        "Do NOT use for: fee calculations (use fee_calculator), date comparisons "
+        "(use date_checker), or general RAG queries."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "value": {
+                "type": "number",
+                "description": "Primary numeric value.",
+            },
+            "percentage": {
+                "type": "number",
+                "description": "Percentage amount from 0 to 100.",
+            },
+            "operation": {
+                "type": "string",
+                "description": "Either 'of' or 'what_pct'.",
+            },
+            "total": {
+                "type": "number",
+                "description": "Total value for the 'what_pct' operation.",
+            },
+        },
+        "required": ["value", "percentage", "operation"],
+    },
+)
+
+
+def get_tool_schemas() -> list[dict[str, Any]]:
+    """Return OpenAI-compatible JSON schemas for the lab tools."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": FEE_CALCULATOR_SCHEMA.name,
+                "description": FEE_CALCULATOR_SCHEMA.description,
+                "parameters": FEE_CALCULATOR_SCHEMA.parameters,
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": DATE_CHECKER_SCHEMA.name,
+                "description": DATE_CHECKER_SCHEMA.description,
+                "parameters": DATE_CHECKER_SCHEMA.parameters,
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": PERCENTAGE_CALCULATOR_SCHEMA.name,
+                "description": PERCENTAGE_CALCULATOR_SCHEMA.description,
+                "parameters": PERCENTAGE_CALCULATOR_SCHEMA.parameters,
+            },
+        },
+    ]
 
 
 def fee_calculator(annual_fee: float, years: float,
