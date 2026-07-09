@@ -611,6 +611,35 @@ def answer_question(
             flags=["empty_input"],
         )
 
+    # ── Pre-rate-limit: gibberish / unintelligible input ──────────────────
+    # Detect input that has no real words (random keystrokes, keyboard mash).
+    # Strategy: a token is "word-like" if it has both a vowel AND a consonant
+    # AND its consonant-to-vowel ratio is ≤ 3 (real English words rarely
+    # exceed 3 consonants per vowel). Pure keyboard rows like "asdfghjkl"
+    # or "qwerty" fail because ratio >> 3 or no vowels at all.
+    def _is_gibberish(text: str) -> bool:
+        tokens = re.findall(r"[a-zA-Z]{3,}", text)  # only tokens of length ≥ 3
+        if len(tokens) < 2:
+            return False  # too short to judge; let the LLM handle it
+        def _word_like(t: str) -> bool:
+            t = t.lower()
+            vowels = sum(1 for c in t if c in "aeiou")
+            consonants = sum(1 for c in t if c.isalpha() and c not in "aeiou")
+            if vowels == 0:
+                return False
+            return (consonants / vowels) <= 3.5
+        real_word_count = sum(1 for t in tokens if _word_like(t))
+        # Gibberish if fewer than 1 real-word-like token out of all tokens
+        return real_word_count == 0
+
+    if _is_gibberish(question):
+        return RAGResult(
+            answer="I'm not sure what you're looking for. Could you ask a specific question about BVRIT Hyderabad — for example about admissions, fees, departments, faculty, or placements?",
+            refused=False,
+            latency_s=round(time.perf_counter() - t0, 2),
+            flags=["gibberish_input"],
+        )
+
     # ── Pre-rate-limit: security / injection pre-screen ──────────────────
     # Known injection patterns are detected and refused immediately, before
     # the rate limiter runs, so they always get a proper security refusal

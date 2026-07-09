@@ -1,4 +1,3 @@
-
 """
 app.py — BVRIT Hyderabad FAQ Chatbot
 =====================================
@@ -6,7 +5,6 @@ Run:  streamlit run app.py
 """
 
 import hashlib
-import html
 import json
 import os
 import re
@@ -15,6 +13,16 @@ from pathlib import Path
 
 import streamlit as st
 from dotenv import load_dotenv
+
+from ui_components import (
+    inject_css,
+    render_hero,
+    render_message,
+    render_empty_state,
+    safe,
+    strip_inline_citations,
+    ALLOWED_DOMAIN,
+)
 
 load_dotenv()
 
@@ -52,7 +60,6 @@ QUICK_PROMPTS = [
 
 MAX_INPUT_CHARS         = 500
 MAX_QUERIES_PER_SESSION = 40
-ALLOWED_DOMAIN          = "bvrithyderabad.edu.in"
 
 KB_DIR       = Path("bvrith_knowledge_base")
 SUMMARY_FILE = KB_DIR / "run_summary.json"
@@ -65,314 +72,10 @@ st.set_page_config(
     page_title="BVRIT Hyderabad — FAQ Chatbot",
     page_icon="🎓",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
-# ---------------------------------------------------------------------------
-# CSS — hide deploy bar, sidebar toggle, toolbar; clean typography
-# ---------------------------------------------------------------------------
-
-CUSTOM_CSS = """
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@500;600&family=Inter:wght@400;500;600;700&display=swap');
-
-/* ── Hide Streamlit chrome ── */
-.stApp > header,
-.stApp [data-testid="stToolbar"],
-[data-testid="stSidebarCollapseButton"],
-[data-testid="collapsedControl"],
-#MainMenu,
-footer { display: none !important; }
-
-/* ── Hide sidebar entirely ── */
-section[data-testid="stSidebar"] { display: none !important; }
-
-:root {
-    --bg:           #f6f1e8;
-    --panel:        rgba(255,255,255,0.80);
-    --panel-strong: #ffffff;
-    --ink:          #1d1b16;
-    --muted:        #6f675e;
-    --line:         #ded4c3;
-    --brand:        #5b2333;
-    --brand-2:      #8b5e34;
-    --accent:       #1f6f63;
-}
-
-html, body, [class*="css"] {
-    font-family: 'Inter', sans-serif;
-    color: var(--ink);
-}
-
-.stApp {
-    background:
-        radial-gradient(circle at top left,  rgba(91,35,51,0.10),  transparent 24%),
-        radial-gradient(circle at top right, rgba(31,111,99,0.10), transparent 20%),
-        linear-gradient(180deg, #fbf8f2 0%, var(--bg) 100%);
-}
-
-.block-container {
-    padding-top: 1.2rem;
-    padding-bottom: 2rem;
-    max-width: 1100px;
-}
-
-/* ── Hero banner ── */
-.hero {
-    background: linear-gradient(135deg, rgba(91,35,51,0.98), rgba(139,94,52,0.92));
-    color: white;
-    border-radius: 20px;
-    padding: 1.3rem 1.5rem;
-    box-shadow: 0 14px 36px rgba(41,20,26,0.16);
-    margin-bottom: 1rem;
-    position: relative;
-    overflow: hidden;
-}
-.hero:before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    background: linear-gradient(120deg, rgba(255,255,255,0.11), transparent 45%);
-    pointer-events: none;
-}
-.hero-title {
-    font-family: 'Source Serif 4', serif;
-    font-size: 1.85rem;
-    font-weight: 600;
-    line-height: 1.1;
-    margin: 0;
-}
-.hero-subtitle {
-    margin-top: 0.4rem;
-    color: rgba(255,255,255,0.86);
-    font-size: 0.94rem;
-}
-.hero-pillrow {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.45rem;
-    margin-top: 0.85rem;
-}
-.hero-pill {
-    background: rgba(255,255,255,0.14);
-    border: 1px solid rgba(255,255,255,0.18);
-    color: white;
-    border-radius: 999px;
-    padding: 0.35rem 0.7rem;
-    font-size: 0.78rem;
-}
-.status-dot {
-    display: inline-block;
-    width: 8px; height: 8px;
-    border-radius: 50%;
-    background: #90e1a2;
-    margin-right: 0.4rem;
-    box-shadow: 0 0 0 3px rgba(144,225,162,0.2);
-}
-
-/* ── Chat area ── */
-.chat-wrap {
-    background: rgba(255,255,255,0.55);
-    border: 1px solid rgba(222,212,195,0.9);
-    border-radius: 20px;
-    padding: 1rem;
-    box-shadow: 0 8px 24px rgba(65,45,27,0.05);
-    min-height: 120px;
-}
-.chat-bubble {
-    border: 1px solid rgba(222,212,195,0.9);
-    border-radius: 16px;
-    padding: 0.9rem 1rem;
-    margin-bottom: 0.65rem;
-    background: var(--panel-strong);
-    box-shadow: 0 6px 16px rgba(43,30,18,0.04);
-}
-.chat-bubble.user {
-    background: linear-gradient(180deg, #f7e7eb, #f3d8df);
-    border-color: rgba(91,35,51,0.12);
-    margin-left: 12%;
-}
-.chat-bubble.assistant {
-    background: linear-gradient(180deg, #ffffff, #fffdf9);
-    margin-right: 8%;
-}
-.chat-label {
-    font-size: 0.71rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--muted);
-    margin-bottom: 0.4rem;
-}
-.chat-text { font-size: 0.95rem; line-height: 1.7; }
-
-/* ── Badges ── */
-.badge {
-    display: inline-flex;
-    align-items: center;
-    font-size: 0.7rem;
-    font-weight: 700;
-    padding: 0.3rem 0.65rem;
-    border-radius: 999px;
-}
-.badge-green { background:#d7f1de; color:#165b2c; }
-.badge-red   { background:#f9dbdf; color:#7f1d2d; }
-.badge-amber { background:#fff0c9; color:#8a5a00; }
-
-/* ── Citation box ── */
-.citation-box {
-    border: 1px solid var(--line);
-    background: rgba(249,245,238,0.92);
-    border-radius: 12px;
-    padding: 0.75rem 0.9rem;
-}
-
-/* ── Eval summary banner ── */
-.summary-banner {
-    background: linear-gradient(135deg, rgba(91,35,51,0.96), rgba(31,111,99,0.94));
-    color: #fff;
-    border-radius: 20px;
-    padding: 1rem 1.1rem;
-    margin-bottom: 1rem;
-    display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
-    gap: 0.65rem;
-}
-.sb-metric {
-    background: rgba(255,255,255,0.12);
-    border: 1px solid rgba(255,255,255,0.12);
-    border-radius: 14px;
-    padding: 0.7rem 0.5rem;
-    text-align: center;
-}
-.sb-num   { font-size: 1.55rem; font-weight: 800; line-height: 1.1; }
-.sb-label { font-size: 0.7rem;  opacity: 0.84; letter-spacing: 0.07em; }
-
-/* ── Eval dimension cards ── */
-.dim-card {
-    background: rgba(255,255,255,0.78);
-    border: 1px solid var(--line);
-    border-radius: 14px;
-    padding: 0.9rem 1rem;
-    margin-bottom: 0.6rem;
-}
-.dim-title  { font-size: 0.93rem; font-weight: 700; color: var(--brand); }
-.dim-counts { font-size: 0.78rem; color: var(--muted); margin-top: 0.18rem; }
-
-/* ── Controls strip ── */
-.controls-strip {
-    background: rgba(255,255,255,0.7);
-    border: 1px solid rgba(222,212,195,0.85);
-    border-radius: 16px;
-    padding: 0.75rem 1rem;
-    margin-bottom: 0.85rem;
-    display: flex;
-    gap: 0.75rem;
-    align-items: flex-end;
-    flex-wrap: wrap;
-}
-
-/* ── Buttons ── */
-.stButton button {
-    border-radius: 10px;
-    border: 1px solid rgba(91,35,51,0.15);
-    background: linear-gradient(180deg, #ffffff, #f3ece1);
-    color: var(--brand);
-    font-weight: 600;
-}
-.stButton button:hover {
-    border-color: rgba(91,35,51,0.28);
-    box-shadow: 0 6px 14px rgba(91,35,51,0.08);
-}
-</style>
-"""
-st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
-
-
-# ---------------------------------------------------------------------------
-# Security helpers
-# ---------------------------------------------------------------------------
-
-def safe(text: str) -> str:
-    return html.escape(str(text))
-
-
-def citation_trusted(citation: str) -> bool:
-    return bool(citation) and ALLOWED_DOMAIN in citation
-
-
-def strip_inline_citations(answer: str) -> str:
-    text = re.sub(r"\s*\[(?:[^\[\]]{2,200}?)\]\s*", " ", answer)
-    text = re.sub(
-        r"\s*[\u2014-]\s*https?://\S+\s*\(?(?:retrieved\s+\d{4}-\d{2}-\d{2}|page\s+\d+)\)?\s*",
-        " ", text, flags=re.IGNORECASE,
-    )
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
-
-
-# ---------------------------------------------------------------------------
-# Render helpers
-# ---------------------------------------------------------------------------
-
-def render_hero(title: str, subtitle: str, pills: list[str], status_line: str):
-    pill_html = "".join(f'<span class="hero-pill">{safe(p)}</span>' for p in pills)
-    st.markdown(
-        f"""
-        <div class="hero">
-          <div class="hero-title">{safe(title)}</div>
-          <div class="hero-subtitle">{safe(subtitle)}</div>
-          <div class="hero-pillrow">{pill_html}</div>
-          <div style="margin-top:0.6rem;font-size:0.78rem;opacity:0.7">
-            <span class="status-dot"></span>{safe(status_line)}
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def render_message(msg: dict):
-    role = msg["role"]
-    content = msg.get("content", "")
-    citations = msg.get("citations", [])
-    images = msg.get("images", [])
-    refused = msg.get("refused", False)
-    no_prediction = msg.get("no_prediction", False)
-
-    label = "You" if role == "user" else "Assistant"
-    bubble_class = "chat-bubble user" if role == "user" else "chat-bubble assistant"
-
-    st.markdown(
-        f"""
-        <div class="{bubble_class}">
-          <div class="chat-label">{label}</div>
-          <div class="chat-text">{safe(content)}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    if citations and role == "assistant":
-        st.markdown(
-            f"""<div class="citation-box"><strong>Sources:</strong><br>{'<br>'.join(safe(c) for c in citations)}</div>""",
-            unsafe_allow_html=True,
-        )
-
-    if images and role == "assistant":
-        cols = st.columns(min(len(images), 5))
-        for col, img in zip(cols, images[:5]):
-            col.image(img.get("url", ""), use_container_width=True)
-
-    if role == "assistant":
-        badges = []
-        if refused:
-            badges.append('<span class="badge badge-red">Refused</span>')
-        if no_prediction:
-            badges.append('<span class="badge badge-amber">No Prediction</span>')
-        if badges:
-            st.markdown(" ".join(badges), unsafe_allow_html=True)
-
+inject_css()
 
 # ---------------------------------------------------------------------------
 # KB helpers
@@ -397,12 +100,10 @@ def get_chroma_stats() -> dict:
         return {"total_chunks": 0, "indexed": False, "error": str(e)}
 
 
-run_summary = load_run_summary()
-crawl_date = run_summary.get("crawl_date", "latest crawl")
-chunk_count = run_summary.get("total_chunks", 0)
+run_summary  = load_run_summary()
 chroma_stats = get_chroma_stats()
-if chunk_count == 0:
-    chunk_count = chroma_stats.get("total_chunks", 0)
+crawl_date   = run_summary.get("crawl_date", chroma_stats.get("crawl_date", "latest crawl"))
+chunk_count  = run_summary.get("total_chunks", 0) or chroma_stats.get("total_chunks", 0)
 
 # ---------------------------------------------------------------------------
 # Session state
@@ -424,17 +125,106 @@ def init_state():
 
 init_state()
 
-# ---------------------------------------------------------------------------
-# Session identity & Memory
-# ---------------------------------------------------------------------------
-
+# Session identity
 if "session_id" not in st.session_state:
     raw = f"{time.time()}-{os.urandom(8).hex()}"
     st.session_state.session_id = hashlib.sha256(raw.encode()).hexdigest()[:16]
 
+# Conversation memory
 if "memory" not in st.session_state:
     from memory import ConversationMemory
     st.session_state.memory = ConversationMemory(st.session_state.session_id)
+
+# ---------------------------------------------------------------------------
+# Sidebar
+# ---------------------------------------------------------------------------
+
+with st.sidebar:
+    # Branding
+    st.markdown(
+        """
+        <div class="sidebar-logo">
+            🎓 BVRIT Hyderabad<br>FAQ Assistant
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown("<hr>", unsafe_allow_html=True)
+
+    # Knowledge Base stats
+    st.markdown('<div class="sidebar-section-header">Knowledge Base</div>', unsafe_allow_html=True)
+    st.markdown(
+        f"""
+        <div class="sidebar-stat">
+            <div class="sidebar-stat-num">{chunk_count:,}</div>
+            <div>Indexed chunks</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"""
+        <div class="sidebar-stat">
+            <div style="font-size:0.7rem;opacity:0.7;margin-bottom:0.1rem">Crawl date</div>
+            <div style="font-weight:600">{crawl_date}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    is_ready = chunk_count > 0
+    status_color = "#90e1a2" if is_ready else "#ff6b6b"
+    status_label = "Ready" if is_ready else "Not indexed"
+    st.markdown(
+        f"""
+        <div class="sidebar-stat">
+            <div style="font-size:0.7rem;opacity:0.7;margin-bottom:0.1rem">Status</div>
+            <div style="font-weight:600">
+                <span style="display:inline-block;width:9px;height:9px;border-radius:50%;
+                    background:{status_color};margin-right:6px;vertical-align:middle"></span>
+                {status_label}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("<hr>", unsafe_allow_html=True)
+
+    # Session stats
+    st.markdown('<div class="sidebar-section-header">Session</div>', unsafe_allow_html=True)
+    queries_used = len([m for m in st.session_state.messages if m["role"] == "user"])
+    remaining    = MAX_QUERIES_PER_SESSION - queries_used
+
+    st.markdown(
+        f"""
+        <div class="sidebar-stat">
+            <div class="sidebar-stat-num">{queries_used}</div>
+            <div>Queries this session</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"""
+        <div class="sidebar-stat">
+            <div style="font-size:0.7rem;opacity:0.7;margin-bottom:0.1rem">Remaining</div>
+            <div style="font-weight:600">{remaining} / {MAX_QUERIES_PER_SESSION}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"""
+        <div class="sidebar-stat">
+            <div style="font-size:0.7rem;opacity:0.7;margin-bottom:0.1rem">Session ID</div>
+            <div style="font-weight:600;font-size:0.78rem;word-break:break-all">
+                {st.session_state.session_id}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 # ---------------------------------------------------------------------------
 # Tabs
@@ -448,42 +238,48 @@ tab_chat, tab_eval, tab_admin = st.tabs(["Chat", "Evaluation", "Admin"])
 
 with tab_chat:
 
-    # Hero
+    # Hero banner
     render_hero(
-        title    = "BVRIT Hyderabad FAQ Assistant",
-        subtitle = "Grounded answers for admissions, departments, faculty, placements, facilities and more.",
-        pills    = ["Admissions", "Departments", "Faculty", "Placements", "Campus", "Research"],
+        title       = "BVRIT Hyderabad FAQ Assistant",
+        subtitle    = "Grounded answers for admissions, departments, faculty, placements, facilities and more.",
+        pills       = ["Admissions", "Departments", "Faculty", "Placements", "Campus", "Research"],
         status_line = f"Source current as of {crawl_date}",
     )
 
-    # Not-indexed warning
     if chunk_count == 0:
-        st.warning("Knowledge base not indexed. Run `python ingest.py` first, then refresh.", icon="⚠️")
+        st.warning("Knowledge base not indexed. Run `python chunk_and_index.py` first, then refresh.", icon="⚠️")
 
     # ── Controls strip ───────────────────────────────────────────────────────
-    with st.container():
-        col_filter, col_model, col_topk, col_reset = st.columns([2, 2, 1, 1])
+    col_filter, col_model, col_topk, col_reset = st.columns([2, 2, 1, 1])
 
-        with col_filter:
-            section_filter_label = st.selectbox("Section", SECTIONS, index=0, label_visibility="collapsed")
-            effective_filter = None if section_filter_label == "All Sections" else section_filter_label
+    with col_filter:
+        st.markdown('<div class="ctrl-label">Section Filter</div>', unsafe_allow_html=True)
+        section_filter_label = st.selectbox(
+            "Section", SECTIONS, index=0, label_visibility="collapsed"
+        )
+        effective_filter = None if section_filter_label == "All Sections" else section_filter_label
 
-        with col_model:
-            model = st.selectbox("Model", GENERATION_MODELS, index=0, label_visibility="collapsed")
+    with col_model:
+        st.markdown('<div class="ctrl-label">Model</div>', unsafe_allow_html=True)
+        model = st.selectbox("Model", GENERATION_MODELS, index=0, label_visibility="collapsed")
 
-        with col_topk:
-            top_k = st.number_input("Top-K", min_value=3, max_value=10, value=5, label_visibility="collapsed")
+    with col_topk:
+        st.markdown('<div class="ctrl-label">Top-K</div>', unsafe_allow_html=True)
+        top_k = st.number_input(
+            "Top-K", min_value=3, max_value=20, value=5, label_visibility="collapsed"
+        )
 
-        with col_reset:
-            if st.button("Reset", use_container_width=True):
-                st.session_state.messages        = []
-                st.session_state.last_latency    = None
-                st.session_state.last_chunks     = None
-                st.session_state.last_tokens_in  = None
-                st.session_state.last_tokens_out = None
-                st.rerun()
+    with col_reset:
+        st.markdown('<div class="ctrl-label">&nbsp;</div>', unsafe_allow_html=True)
+        if st.button("Reset chat", use_container_width=True):
+            st.session_state.messages        = []
+            st.session_state.last_latency    = None
+            st.session_state.last_chunks     = None
+            st.session_state.last_tokens_in  = None
+            st.session_state.last_tokens_out = None
+            st.rerun()
 
-    # ── Remembered context (from memory module) ──
+    # ── Memory context blurb ─────────────────────────────────────────────────
     memory = st.session_state.get("memory")
     if memory:
         blurb = memory.entities.get_context_blurb()
@@ -496,22 +292,20 @@ with tab_chat:
         if col.button(label, use_container_width=True):
             st.session_state.pending_prompt = label
 
-    # ── Chat history ─────────────────────────────────────────────────────────
-    st.markdown('<div class="chat-wrap">', unsafe_allow_html=True)
+    # ── Chat messages ────────────────────────────────────────────────────────
     if not st.session_state.messages:
-        st.caption("Ask about admissions, fees, departments, faculty, placements, campus facilities or contact details.")
+        render_empty_state()
     else:
         for msg in st.session_state.messages:
             render_message(msg)
-    st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── Last query stats (compact, below chat) ───────────────────────────────
+    # ── Last query metrics (compact) ─────────────────────────────────────────
     if st.session_state.last_latency is not None:
-        sc1, sc2, sc3, sc4 = st.columns(4)
-        sc1.metric("Latency", f"{st.session_state.last_latency:.2f}s")
-        sc2.metric("Chunks used", st.session_state.last_chunks)
-        sc3.metric("Tokens in",  st.session_state.last_tokens_in)
-        sc4.metric("Tokens out", st.session_state.last_tokens_out)
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        mc1.metric("Latency",    f"{st.session_state.last_latency:.2f}s")
+        mc2.metric("Chunks",     st.session_state.last_chunks)
+        mc3.metric("Tokens in",  st.session_state.last_tokens_in)
+        mc4.metric("Tokens out", st.session_state.last_tokens_out)
 
     # ── Chat input ───────────────────────────────────────────────────────────
     chat_input = st.chat_input("Ask about BVRIT Hyderabad…", max_chars=MAX_INPUT_CHARS)
@@ -523,28 +317,26 @@ with tab_chat:
 
     if prompt:
         prompt = re.sub(r"\s+", " ", prompt).strip()
-        queries_used = len(st.session_state.messages) // 2
 
-        # Input sanitization
-        if len(prompt) == 0 or len(prompt.split()) == 0:
-            answer_msg = {
+        if not prompt:
+            st.session_state.messages.append({
                 "role": "assistant",
-                "content": "Please ask a clear question about BVRIT Hyderabad — admissions, departments, fees, placements, faculty, or campus facilities.",
+                "content": "Please ask a question about BVRIT Hyderabad — admissions, departments, fees, placements, faculty, or campus facilities.",
                 "citations": [],
-                "refused": True,
-            }
-            st.session_state.messages.append(answer_msg)
+                "refused": False,
+            })
             st.rerun()
 
-        if queries_used >= MAX_QUERIES_PER_SESSION:
+        elif queries_used >= MAX_QUERIES_PER_SESSION:
             st.warning("Session query limit reached. Reset the conversation to continue.")
-        elif prompt:
+
+        else:
             st.session_state.messages.append({"role": "user", "content": prompt})
 
             if chunk_count == 0:
                 answer_msg = {
                     "role": "assistant",
-                    "content": "The knowledge base hasn't been indexed yet. Please run `python ingest.py` to build the vector store, then refresh.",
+                    "content": "The knowledge base hasn't been indexed yet. Please run `python chunk_and_index.py` to build the vector store, then refresh.",
                     "citations": [],
                     "refused": True,
                 }
@@ -553,16 +345,16 @@ with tab_chat:
                     try:
                         from rag import answer_question
                         result = answer_question(
-                            question      = prompt,
-                            section_filter= effective_filter,
-                            top_k         = top_k,
-                            model         = model,
-                            history       = [
+                            question       = prompt,
+                            section_filter = effective_filter,
+                            top_k          = int(top_k),
+                            model          = model,
+                            history        = [
                                 m for m in st.session_state.messages[:-1]
                                 if m["role"] in ("user", "assistant")
                             ],
-                            session_id    = st.session_state.session_id,
-                            memory        = st.session_state.memory,
+                            session_id     = st.session_state.session_id,
+                            memory         = st.session_state.memory,
                         )
                         st.session_state.last_latency    = result.latency_s
                         st.session_state.last_chunks     = result.chunks_retrieved
@@ -600,22 +392,21 @@ with tab_chat:
 with tab_eval:
 
     render_hero(
-        title    = "Evaluation Dashboard",
-        subtitle = "Functional checks, safety probes, retrieval quality, and RAGAS metrics.",
-        pills    = ["Functional", "Safety", "Retrieval", "RAGAS"],
+        title       = "Evaluation Dashboard",
+        subtitle    = "Functional checks, safety probes, retrieval quality, and RAGAS metrics.",
+        pills       = ["Functional", "Safety", "Retrieval", "RAGAS"],
         status_line = "Live chatbot under test",
     )
 
-    # ── Run controls ─────────────────────────────────────────────────────────
     ctrl_a, ctrl_b, ctrl_c = st.columns([1, 1, 2])
     with ctrl_a:
         run_btn = st.button("Run Evaluation", type="primary", use_container_width=True)
     with ctrl_b:
-        skip_ragas = st.checkbox("Skip RAGAS", value=False)
+        skip_ragas = st.checkbox("Skip RAGAS", value=True)
     with ctrl_c:
         dim_options = ["All"] + [
             f"{k} — {v}" for k, v in {
-                "01": "Functional", "02": "Quality",  "03": "Safety",
+                "01": "Functional", "02": "Quality",   "03": "Safety",
                 "04": "Security",   "05": "Robustness","06": "Performance",
                 "07": "Context",    "08": "RAGAS",
             }.items()
@@ -640,7 +431,6 @@ with tab_eval:
         s        = report["summary"]
         pass_pct = int(s["pass_rate"] * 100)
 
-        # ── Summary banner ────────────────────────────────────────────────────
         st.markdown(
             f"""
             <div class="summary-banner">
@@ -654,7 +444,6 @@ with tab_eval:
             unsafe_allow_html=True,
         )
 
-        # ── Dimension results ─────────────────────────────────────────────────
         st.markdown("### Dimension Results")
         dims = report.get("dimensions", [])
         rows = [dims[i:i+2] for i in range(0, len(dims), 2)]
@@ -683,7 +472,6 @@ with tab_eval:
                         icon = {"PASS": "✅", "FAIL": "❌", "WARN": "⚠️"}.get(case["verdict"], "❓")
                         st.caption(f"{icon} {case['id']}: {case['reason'][:80]}")
 
-        # ── Failed test details ───────────────────────────────────────────────
         all_cases = [c for d in dims for c in d.get("cases", [])]
         failures  = [c for c in all_cases if c["verdict"] == "FAIL"]
         if failures:
@@ -695,7 +483,6 @@ with tab_eval:
                     st.markdown(f"**Root cause:** {safe(c.get('root_cause', ''))}")
                     st.markdown(f"**Suggested fix:** {safe(c.get('fix', ''))}")
 
-        # ── Weakest dimension ─────────────────────────────────────────────────
         wd = report.get("weakest_dimension")
         if wd:
             st.markdown("### Weakest Dimension")
@@ -703,7 +490,6 @@ with tab_eval:
                 f"**{wd['id']} {wd['name']}** ({int(wd['pass_rate']*100)}% pass rate)\n\n{wd['fix']}"
             )
 
-        # ── RAGAS metrics ─────────────────────────────────────────────────────
         ragas = report.get("ragas", {})
         if ragas and "error" not in ragas:
             st.markdown("### RAGAS Metrics")
@@ -724,26 +510,13 @@ with tab_eval:
                             unsafe_allow_html=True,
                         )
                         st.progress(val, text=f"{val:.3f}")
-
-            scores = [ragas[k] for k, _, _ in metric_info if ragas.get(k) is not None]
-            if scores:
-                weakest = min(metric_info, key=lambda t: ragas.get(t[0]) or 1.0)
-                diagnoses = {
-                    "context_precision": "Consider reducing chunk_size or adding section metadata filters.",
-                    "context_recall":    "Consider increasing top_k or chunk overlap.",
-                    "faithfulness":      "Tighten the GROUNDING RULE in the system prompt.",
-                    "answer_relevancy":  "Check that retrieved chunks are not too noisy.",
-                }
-                st.info(diagnoses.get(weakest[0], "Review retrieval configuration."))
         elif ragas.get("error"):
             st.caption(f"RAGAS skipped: {ragas['error']}")
 
-        # ── Security residual risk ────────────────────────────────────────────
         if report.get("residual_risk_statement"):
             st.markdown("### Security — Residual Risk")
             st.info(report["residual_risk_statement"])
 
-        # ── Download ──────────────────────────────────────────────────────────
         st.download_button(
             label     = "Download JSON Report",
             data      = json.dumps(report, indent=2),
@@ -753,7 +526,7 @@ with tab_eval:
 
 
 # ===========================================================================
-# TAB 3 — ADMIN DASHBOARD (governance + audit)
+# TAB 3 — ADMIN
 # ===========================================================================
 
 with tab_admin:
@@ -762,71 +535,67 @@ with tab_admin:
 
     try:
         from governance import AuditLog, RateLimiter
+
         audit = AuditLog()
         stats = audit.get_stats()
 
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Total Queries", stats["total_queries"])
-        col2.metric("Today", stats["today_queries"])
-        col3.metric("Avg Latency", f"{stats['avg_latency_s']:.2f}s")
-        col4.metric("Total Tokens", stats["total_tokens"])
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total Queries",  stats["total_queries"])
+        c2.metric("Today",          stats["today_queries"])
+        c3.metric("Avg Latency",    f"{stats['avg_latency_s']:.2f}s")
+        c4.metric("Total Tokens",   stats["total_tokens"])
 
         st.divider()
-
-        # Model distribution
         st.markdown("### Model Distribution")
         dist = stats.get("model_distribution", {})
         if dist:
-            for model_name, count in dist.items():
-                st.caption(f"{model_name}: {count} queries")
+            for m_name, count in dist.items():
+                st.caption(f"{m_name}: {count} queries")
         else:
             st.caption("No data yet.")
 
         st.divider()
-
-        # Rate limit info
         st.markdown("### Rate Limiting")
-        limiter = RateLimiter(max_per_session=40, max_per_minute=10)
-        usage = limiter.get_usage(st.session_state.get("session_id", "default"))
+        limiter = RateLimiter(max_per_session=MAX_QUERIES_PER_SESSION, max_per_minute=10)
+        usage   = limiter.get_usage(st.session_state.get("session_id", "default"))
         st.caption(f"Session queries: {usage['session_queries']} / {usage['max_per_session']}")
         st.caption(f"Remaining: {usage['remaining']}")
 
         st.divider()
-
-        # Recent audit log
         st.markdown("### Recent Activity")
         recent = audit.get_recent(limit=20)
         if recent:
             for entry in recent:
-                flags_str = entry.get("flags", "[]")
+                flags_raw = entry.get("flags", "[]")
                 try:
-                    import json as _j
-                    flags = _j.loads(flags_str) if isinstance(flags_str, str) else flags_str
+                    flags = json.loads(flags_raw) if isinstance(flags_raw, str) else flags_raw
                 except Exception:
                     flags = []
-                flag_badge = f" [{', '.join(flags)}]" if flags else ""
+                flag_str = f" [{', '.join(flags)}]" if flags else ""
                 st.markdown(
-                    f"**{entry['timestamp'][:19]}** | {entry['model']} | "
-                    f"{entry['latency_s']:.1f}s | {entry['tokens_in'] + entry['tokens_out']} tokens"
-                    f"{flag_badge}",
+                    f'<div class="log-entry">'
+                    f'<div class="log-meta">'
+                    f'<span class="log-time">{entry["timestamp"][:19]}</span>'
+                    f'<span class="log-pill">{entry["model"]}</span>'
+                    f'<span class="log-pill">{entry["latency_s"]:.1f}s</span>'
+                    f'<span class="log-pill">{entry["tokens_in"] + entry["tokens_out"]} tok</span>'
+                    f'{flag_str}'
+                    f'</div>'
+                    f'<div class="log-q">Q: {safe(entry["query"][:140])}</div>'
+                    f'<div class="log-a">A: {safe(entry["response"][:140])}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
                 )
-                st.caption(f"Q: {entry['query'][:120]}")
-                st.caption(f"A: {entry['response'][:120]}")
-                st.markdown("---")
         else:
-            st.caption("No queries logged yet. Start chatting to see activity here.")
+            st.caption("No queries logged yet.")
 
         st.divider()
-
-        # Prompt version
         st.markdown("### Prompt Version")
         last_entry = recent[0] if recent else None
         if last_entry and last_entry.get("prompt_version"):
-            st.caption(f"Last used prompt version: `{last_entry['prompt_version']}`")
+            st.caption(f"Last used: `{last_entry['prompt_version']}`")
         else:
             st.caption("No prompt version tracked yet.")
 
     except Exception as e:
         st.warning(f"Admin dashboard unavailable: {e}")
-
-
