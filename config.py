@@ -24,9 +24,9 @@ EMBED_DIM         = 384
 
 # ── Generation models (display name → OpenRouter model id) ───────────────────
 MODEL_MAP = {
-    "Free Router":        "openrouter/free",
-    "Gemma 4 31B":        "google/gemma-4-31b-it:free",
-    "Llama 3.3 70B":      "meta-llama/llama-3.3-70b-instruct:free",
+    "GPT-4o Mini":   "openai/gpt-4o-mini",
+    "Gemma 4 31B":   "google/gemma-4-31b-it:free",
+    "Llama 3.3 70B": "meta-llama/llama-3.3-70b-instruct:free",
 }
 
 # ── Retrieval ────────────────────────────────────────────────────────────────

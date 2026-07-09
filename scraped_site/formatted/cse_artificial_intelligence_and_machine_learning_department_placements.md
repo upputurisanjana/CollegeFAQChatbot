@@ -1,0 +1,3 @@
+**CSE - ARTIFICIAL INTELLIGENCE & MACHINE LEARNING**
+
+## Department Placements

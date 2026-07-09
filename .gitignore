@@ -2,9 +2,7 @@
 .env
 
 # Generated knowledge base (regenerate with bvrith_kb_scraper.py + ingest.py)
-bvrith_knowledge_base/
 chroma_bvrith/
-chroma_db/
 chroma_db_test/
 
 # HandsOn exercise files (reference only, not part of the app)
@@ -30,7 +28,6 @@ env/
 # OS
 .DS_Store
 Thumbs.db
-scraped_site
 refernce
 
 # Runtime database (regenerated per session)
@@ -44,3 +41,10 @@ ui_components.py
 
 # Reference material
 reference/
+
+batch_test_20_full.json
+batch_test_20_retrieval.json
+batch_test_20_retrieval_results.json
+
+test_im
+.agents/

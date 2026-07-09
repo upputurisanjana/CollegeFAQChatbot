@@ -263,14 +263,87 @@ def retrieve(
 ) -> list[RetrievedChunk]:
     """
     Embed question → query Chroma → return top_k chunks.
-    Post-filters by section heading (Chroma $contains not available in this version).
+    For faculty queries, directly fetches /faculty/ URL chunks by metadata
+    filter (the faculty list pages score poorly on cosine similarity because
+    they are dense name/ID tables with little prose).
     """
     collection = _get_collection()
     query_embedding = _embed_query(question)
 
+    # Detect faculty query and which department is being asked about
+    q_lower_check = question.lower()
+    is_faculty_query = any(kw in q_lower_check for kw in [
+        "faculty", "professor", "teacher", "staff", "hod", "head of department",
+        "lectur", "assistant prof", "associate prof",
+    ])
+
+    # Map common department keywords to URL slug fragments
+    _DEPT_SLUGS = {
+        "cse":              "computer-science-and-engineering/faculty",
+        "computer science": "computer-science-and-engineering/faculty",
+        "ece":              "electronics-and-communication-engineering/faculty",
+        "electronics":      "electronics-and-communication-engineering/faculty",
+        "eee":              "electrical-and-electronics-engineering/faculty",
+        "electrical":       "electrical-and-electronics-engineering/faculty",
+        "it ":              "information-technology/faculty",
+        "information tech": "information-technology/faculty",
+        "csm":              "cse-artificial-intelligence-and-machine-learning/faculty",
+        "ai":               "cse-artificial-intelligence-and-machine-learning/faculty",
+        "ml":               "cse-artificial-intelligence-and-machine-learning/faculty",
+        "mba":              "mba/faculty",
+        "mca":              "mca/faculty",
+        "basic sciences":   "basic-sciences-and-humanities/faculty",
+        "humanities":       "basic-sciences-and-humanities/faculty",
+        "bs&h":             "basic-sciences-and-humanities/faculty",
+    }
+
+    direct_faculty_chunks: list[RetrievedChunk] = []
+    if is_faculty_query:
+        matched_slug = None
+        for keyword, slug in _DEPT_SLUGS.items():
+            if keyword in q_lower_check:
+                matched_slug = slug
+                break
+
+        if matched_slug:
+            # Fetch all chunks whose source_url contains the faculty slug directly
+            all_data = collection.get(include=["documents", "metadatas"])
+            for cid, doc, meta in zip(
+                all_data["ids"], all_data["documents"], all_data["metadatas"]
+            ):
+                url = meta.get("source_url") or meta.get("source_path", "")
+                if matched_slug in url:
+                    section = meta.get("section_heading") or meta.get("section", "Faculty")
+                    ingested = meta.get("ingested_date") or meta.get("retrieved_at_utc", "")
+                    direct_faculty_chunks.append(RetrievedChunk(
+                        chunk_id        = cid,
+                        text            = doc or "",
+                        source_url      = url,
+                        section         = section,
+                        page_title      = section.split(" > ")[0] if ">" in section else section,
+                        retrieved_at    = ingested,
+                        pdf_page_number = int(meta.get("pdf_page_number", -1)),
+                        score           = 1.0,   # direct match — treat as top relevance
+                    ))
+
+        # If we got direct faculty chunks, return them immediately (no need to rank)
+        if direct_faculty_chunks:
+            # Deduplicate by content fingerprint (trailing/with-slash URL variants)
+            seen: set[str] = set()
+            deduped: list[RetrievedChunk] = []
+            for c in direct_faculty_chunks:
+                key = c.text[:80]
+                if key not in seen:
+                    seen.add(key)
+                    deduped.append(c)
+            return deduped  # return all — LLM will list them; no top_k cap needed
+
+    # Standard embedding-based retrieval for all other queries
+    pool_size = min(top_k * 10 if is_faculty_query else top_k * 4, collection.count() or 1)
+
     query_kwargs: dict = dict(
         query_embeddings=[query_embedding],
-        n_results=min(top_k * 4, collection.count() or 1),
+        n_results=pool_size,
         include=["documents", "metadatas", "distances"],
     )
 
@@ -287,6 +360,15 @@ def retrieve(
         section = meta.get("section_heading") or meta.get("section", "General")
         source_path = meta.get("source_path") or meta.get("source_url", "")
         ingested = meta.get("ingested_date") or meta.get("retrieved_at_utc", "")
+        
+        # Boost faculty URLs when query asks for faculty
+        q_lower = question.lower()
+        if any(kw in q_lower for kw in ["faculty", "professor", "teacher", "staff", "hod", "head of department"]):
+            if "/faculty/" in source_path or "/faculty" in source_path:
+                similarity += 0.15  # boost faculty pages
+            if "/about-hod" in source_path:
+                similarity += 0.20  # boost HoD pages even more for HoD queries
+        
         chunks.append(RetrievedChunk(
             chunk_id        = cid,
             text            = doc or "",
@@ -304,6 +386,8 @@ def retrieve(
         if filtered:
             chunks = filtered
 
+    # Re-sort after boosting
+    chunks.sort(key=lambda c: c.score, reverse=True)
     return chunks[:top_k]
 
 
@@ -327,7 +411,7 @@ def _format_context(chunks: list[RetrievedChunk]) -> str:
 
 
 def _extract_citations(chunks: list[RetrievedChunk]) -> list[str]:
-    """Build human-readable citation strings from retrieved chunks."""
+    """Build human-readable citation strings from retrieved chunks. Max 5, deduped."""
     seen, citations = set(), []
     for c in chunks:
         url = c.source_url
@@ -342,6 +426,8 @@ def _extract_citations(chunks: list[RetrievedChunk]) -> list[str]:
         else:
             date = c.retrieved_at[:10] if c.retrieved_at else ""
             citations.append(f"{c.section} — {url}" + (f" (retrieved {date})" if date else ""))
+        if len(citations) >= 5:
+            break
     return citations
 
 
@@ -361,6 +447,41 @@ _REFUSAL_PHRASES = [
     "individual outcome",
     "no relevant content found in the knowledge base",
 ]
+
+
+def _strip_reasoning(text: str) -> str:
+    """
+    Remove chain-of-thought reasoning blocks that some models (DeepSeek, etc.)
+    emit before the actual answer. Handles:
+      - <think>...</think> tags
+      - <thinking>...</thinking> tags
+      - Lines starting with "We need to", "Let's", "Thus we", "From chunk" etc.
+        that look like internal reasoning leaked into the answer
+    """
+    if not text:
+        return text
+    # Strip XML-style think blocks
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<thinking>.*?</thinking>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    # If text still starts with what looks like leaked reasoning (long block before
+    # the actual answer), try to find where the real answer begins — look for the
+    # first line that doesn't read like internal monologue
+    lines = text.strip().split('\n')
+    reasoning_patterns = re.compile(
+        r'^(We need to|Let\'s|Thus we|From chunk|Chunk \d|Also check|We must|We should|'
+        r'We have|Let me|First,|So we|Now we|Looking at|Based on this|I need to|'
+        r'The chunk|We can|We will|We are)',
+        re.IGNORECASE
+    )
+    # Find first non-reasoning line
+    start = 0
+    for i, line in enumerate(lines):
+        if not reasoning_patterns.match(line.strip()) and line.strip():
+            start = i
+            break
+    if start > 0:
+        text = '\n'.join(lines[start:])
+    return re.sub(r'\n{3,}', '\n\n', text).strip()
 
 
 def _detect_refusal(answer_text: str, citations: list[str]) -> bool:
@@ -416,8 +537,25 @@ def _expand_query(question: str) -> str:
     # Hostel queries
     if any(kw in q_lower for kw in ["hostel", "accommodation", "stay", "room"]):
         return question + " hostel facility fee accommodation BVRIT"
+    # HoD / Head of Department queries — boost about-hod pages
+    if any(kw in q_lower for kw in ["hod", "head of department", "head of the department", "who is hod", "department head"]):
+        dept_hod = {
+            "cse": "Computer Science Engineering CSE Head of Department HoD about-hod Dr Aruna Rao",
+            "computer science": "Computer Science Engineering CSE Head of Department HoD about-hod Dr Aruna Rao",
+            "ece": "Electronics Communication Engineering ECE Head of Department HoD Dr Nagesh Deevi",
+            "electronics": "Electronics Communication Engineering ECE Head of Department HoD",
+            "eee": "Electrical Electronics Engineering EEE Head of Department HoD",
+            "electrical": "Electrical Electronics Engineering EEE Head of Department HoD",
+            "it": "Information Technology IT Head of Department HoD",
+            "ai": "CSE Artificial Intelligence Machine Learning AIML Head of Department HoD",
+            "aiml": "CSE Artificial Intelligence Machine Learning AIML Head of Department HoD",
+        }
+        for key, expansion in dept_hod.items():
+            if re.search(r'\b' + re.escape(key) + r'\b', q_lower):
+                return question + " " + expansion
+        return question + " Head of Department HoD Professor about-hod BVRIT department"
     # Faculty queries — add department context for better retrieval
-    if any(kw in q_lower for kw in ["faculty", "professor", "staff", "teacher", "hod", "give", "list", "show"]):
+    if any(kw in q_lower for kw in ["faculty", "professor", "staff", "teacher", "give", "list", "show"]):
         dept_expansions = {
             "ece": "Electronics and Communication Engineering ECE faculty professor staff",
             "electronics": "Electronics and Communication Engineering ECE faculty professor staff",
@@ -425,15 +563,12 @@ def _expand_query(question: str) -> str:
             "computer science": "Computer Science Engineering CSE faculty professor staff",
             "eee": "Electrical Electronics Engineering EEE faculty professor staff",
             "electrical": "Electrical Electronics Engineering EEE faculty professor staff",
-            # Guard "it": only match as a whole word (i.e. "IT department"), not as a substring
-            # of words like "it is", "activities", "facilities" etc.
             "information technology": "Information Technology IT faculty professor staff",
             "ai": "CSE Artificial Intelligence Machine Learning AIML faculty professor staff",
             "aiml": "CSE Artificial Intelligence Machine Learning AIML faculty professor staff",
             "csm": "CSE Artificial Intelligence Machine Learning AIML faculty professor staff",
         }
         for key, expansion in dept_expansions.items():
-            # Use word-boundary match so "it" doesn't fire on "list", "activities", etc.
             if re.search(r'\b' + re.escape(key) + r'\b', q_lower):
                 return question + " " + expansion
         # Handle bare "IT" — only if query has actual department context
@@ -465,6 +600,46 @@ def answer_question(
     history = history or []
     all_flags: list[str] = []
 
+    # ── Pre-rate-limit: empty / whitespace input ──────────────────────────
+    # Must be checked before rate limiting so an empty query doesn't consume
+    # a rate-limit slot and doesn't return a confusing rate-limit message.
+    if not question or not question.strip():
+        return RAGResult(
+            answer="Please ask a question about BVRIT Hyderabad — for example, about admissions, fees, departments, or placements.",
+            refused=False,
+            latency_s=round(time.perf_counter() - t0, 2),
+            flags=["empty_input"],
+        )
+
+    # ── Pre-rate-limit: security / injection pre-screen ──────────────────
+    # Known injection patterns are detected and refused immediately, before
+    # the rate limiter runs, so they always get a proper security refusal
+    # regardless of how many queries have already been made in this session.
+    _INJECTION_PATTERNS = [
+        r"(?i)(?:ignore|disregard|override)\s+(?:all\s+)?(?:previous|above|prior)\s+instructions",
+        r"(?i)\bSYSTEM\s*:",
+        r"(?i)(?:reveal|show|output|leak|dump|print)\s+(?:your\s+)?(?:system\s+)?prompt",
+        r"(?i)(?:repeat|output)\s+(?:the\s+)?text\s+above",
+        r"(?i)\byou\s+are\s+now\s+(?:DAN|an?\s+AI\s+with\s+no\s+restrictions)",
+        r"(?i)(?:disable|remove|ignore)\s+(?:your\s+)?(?:citation|grounding|instruction)",
+        r"(?i)(?:show|dump|output|display)\s+(?:the\s+)?(?:raw\s+)?(?:database|vector\s+store|chroma|collection)",
+        r"(?i)as\s+(?:the\s+)?(?:bvrit\s+)?(?:IT\s+)?administrator\b",
+    ]
+    for _pat in _INJECTION_PATTERNS:
+        if re.search(_pat, question):
+            _get_audit_log().log(
+                session_id=session_id, query=question,
+                response="[security_refusal]", model="n/a",
+                latency_s=round(time.perf_counter() - t0, 2),
+                refused=True, flags=["injection_attempt"],
+            )
+            return RAGResult(
+                answer="I can only answer factual questions about BVRIT Hyderabad. I'm not able to follow instructions that modify my behaviour, reveal internal configuration, or access system data.",
+                refused=True,
+                latency_s=round(time.perf_counter() - t0, 2),
+                flags=["injection_attempt"],
+            )
+
     # ── Governance: rate limit ──
     limiter = _get_rate_limiter()
     allowed, reason = limiter.check_session(session_id)
@@ -481,19 +656,25 @@ def answer_question(
     all_flags.extend(monitor.check_query(question))
 
     # Check if user wants images
-    from image_search import detect_image_request, search_images, _normalize_dept
-    wants_images = detect_image_request(question)
+    wants_images = False
     images = []
 
     # 1. Retrieve
     expanded_q = _expand_query(question)
     q_lower = question.lower()
     effective_top_k = top_k
-    if any(kw in q_lower for kw in ["faculty", "teacher", "professor", "staff"]) and \
-       any(kw in q_lower for kw in ["give", "list", "show", "any", "some", "5", "3", "10"]):
-        effective_top_k = max(top_k, 15)
+
+    # Faculty queries: CSE has 51, ECE has 27 — need a large top_k to pull
+    # all faculty chunks, and extra output tokens to list them all.
+    _is_faculty_query = any(kw in q_lower for kw in [
+        "faculty", "teacher", "professor", "staff", "hod", "head of department",
+        "lectur", "assistant prof", "associate prof",
+    ])
+    if _is_faculty_query:
+        effective_top_k = max(top_k, 30)
     if any(kw in q_lower for kw in ["department", "departments", "branch", "branches", "course", "offered", "programme"]):
         effective_top_k = max(top_k, 20)
+
     chunks = retrieve(expanded_q, section_filter, effective_top_k)
     relevant = [c for c in chunks if c.score >= MIN_RELEVANCE_SCORE]
     if not relevant:
@@ -519,12 +700,17 @@ def answer_question(
     tokens_in = tokens_out = 0
     answer_text = ""
 
+    # Faculty listings need more output tokens — 51 members × ~15 tokens each
+    # ≈ 765 tokens for names alone, plus structure and citations.
+    # All other queries stay at 800 to keep costs down.
+    _max_tokens = 2500 if _is_faculty_query else 800
+
     def _llm_call(msgs: list[dict], extra_kwargs: dict | None = None) -> dict:
         kwargs = dict(
             model=model_id,
             messages=msgs,
             temperature=0.1,
-            max_tokens=800,
+            max_tokens=_max_tokens,
             tools=TOOLS,
         )
         if extra_kwargs:
@@ -571,13 +757,13 @@ def answer_question(
             tokens_in += result["tokens_in"]
             # Second call with tool results
             result2 = _llm_call(messages)
-            answer_text = result2["content"]
+            answer_text = _strip_reasoning(result2["content"])
             tokens_in += result2["tokens_in"]
             tokens_out = result2["tokens_out"]
 
         # CASE B: plain text
         else:
-            answer_text = result["content"]
+            answer_text = _strip_reasoning(result["content"])
             tokens_in = result["tokens_in"]
             tokens_out = result["tokens_out"]
 
@@ -588,6 +774,20 @@ def answer_question(
         )
 
     latency = time.perf_counter() - t0
+
+    # Post-process: remove principal from faculty lists per grounding rule
+    if any(kw in question.lower() for kw in ["faculty", "professor", "teacher", "staff"]):
+        answer_text = re.sub(
+            r'(?m)^\d+\.\s+.*?K\.?V\.?N\.?\s+Sunitha.*\n?',
+            '', answer_text, flags=re.IGNORECASE
+        )
+        # Re-number the list sequentially
+        counter = [0]
+        def _renum(m):
+            counter[0] += 1
+            return f"{counter[0]}."
+        answer_text = re.sub(r'(?m)^\d+\.', _renum, answer_text)
+        answer_text = re.sub(r'\n{3,}', '\n\n', answer_text).strip()
 
     # Image search
     if wants_images:

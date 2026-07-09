@@ -1,0 +1,23 @@
+---
+url: https://bvrithyderabad.edu.in/differentiators/student-affairs-council-sac/
+title: "Student Affairs Council (SAC) – BVRIT HYDERABAD College of Engineering for Women"
+retrieved_at: 2026-07-09T05:19:12+00:00
+---
+
+# Student Affairs Council (SAC) – BVRIT HYDERABAD College of Engineering for Women
+
+###### DIFFERENTIATORS
+
+### Student Affairs Council (SAC)
+
+The Student Affairs Council (SAC) of BVRIT Hyderabad College of Engineering for Women , under Sri Vishnu Educational Society (SVES), is a landmark student-governed body established in 2025. It is the only council of its kind across the entire SVES family, making BVRITHCEW the first institution to introduce a formal, student-elected representative system. The SAC was founded through the vision, encouragement, and unwavering support of our beloved Principal, Dr. K.V.N. Sunitha, whose strong belief in student empowerment and leadership cultivation made this initiative possible.
+
+The SAC serves as the official voice of the students, created to represent their concerns, ideas, and aspirations while building a strong bridge between the student community and the administration. It strives to create an inclusive, vibrant, and engaging campus environment through student-led initiatives and activities. The council is rooted in values of responsibility, integrity, and excellence, and is dedicated to enhancing the college’s moral and ethical standards while upholding and promoting the rich culture of BVRITHCEW. With members from all years and branches, the SAC stands as a unified and diverse representation of the student body.
+
+The council is composed of 10 elected members, including a President, Vice President, Secretary, Joint Secretary, Treasurer, and five student members. Students eager to contribute were invited to nominate themselves, ensuring transparency and active student participation. The SAC functions with strong mentorship from our Principal, Dr. K.V.N. Sunitha, the Dean of Student Affairs & Vice Principal, Dr. Ch. Sunil Kumar, and faculty incharge Dr.V. Malathi whose guidance and encouragement strengthen the council’s efforts and direction.
+
+The first tenure of the SAC was exceptionally impactful, going far beyond expectations. Within just three months of its formation, the council successfully organized Synergia, a grand three-day college fest featuring technical events, cultural programs, annual day celebrations, and inter-college participation. Synergia left a historic mark on BVRITHCEW, setting a new benchmark for student-led initiatives and showcasing the council’s capability, teamwork, and dedication.
+
+Following this legacy, the second tenure of the SAC officially commenced with a dignified oath ceremony held on November 17th. The newly elected council members pledged to uphold the values of the institution, represent the student body faithfully, and continue elevating the spirit and culture of BVRITHCEW. With renewed enthusiasm and responsibility, the new council aims to further enrich the campus atmosphere, strengthen communication, and serve as a pillar of support for every student.
+
+Today, the Student Affairs Council stands as a symbol of leadership, unity, and student empowerment at BVRITHCEW, guided by the vision of Dr. K.V.N. Sunitha and supported by dedicated faculty mentors, SAC continues to inspire excellence and ensure that every student’s voice is heard, valued, and represented.
