@@ -101,9 +101,7 @@ def _load_images() -> list[dict]:
                 continue
             try:
                 img = json.loads(line)
-                # Only include images that were successfully saved
-                if img.get("status") == "saved" or "local_path" in img:
-                    images.append(img)
+                images.append(img)
             except json.JSONDecodeError:
                 continue
     return images

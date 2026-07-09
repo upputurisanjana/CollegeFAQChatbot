@@ -31,3 +31,16 @@ env/
 .DS_Store
 Thumbs.db
 scraped_site
+refernce
+
+# Runtime database (regenerated per session)
+chat_history.db
+
+# Generated test output files
+*.json
+
+# Standalone UI component (reference)
+ui_components.py
+
+# Reference material
+reference/

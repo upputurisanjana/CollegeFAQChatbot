@@ -9,7 +9,7 @@ import threading
 from datetime import datetime
 from typing import Optional
 
-DB_PATH = "chat_history.db"
+from config import DB_PATH
 
 
 _NAME_PATTERN = re.compile(

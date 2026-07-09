@@ -36,6 +36,11 @@ import chromadb
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from config import (
+    CHROMA_DIR, COLLECTION_NAME, EMBED_MODEL, EMBED_DIM,
+    ALLOWED_DOMAIN, MODEL_MAP, MIN_RELEVANCE_SCORE,
+    get_api_key, get_api_base,
+)
 from tools import TOOLS, dispatch_tool
 
 load_dotenv()
@@ -80,29 +85,6 @@ def _get_prompt_version():
         from governance import PromptVersion
         _prompt_version = PromptVersion()
     return _prompt_version
-
-# ---------------------------------------------------------------------------
-# Config — must match ingest.py
-# ---------------------------------------------------------------------------
-
-CHROMA_DIR       = "chroma_db"
-COLLECTION_NAME  = "langchain"
-EMBED_MODEL      = "all-MiniLM-L6-v2"
-EMBED_DIM        = 384
-ALLOWED_DOMAIN   = "bvrithyderabad.edu.in"
-
-# Model name → OpenRouter model id
-MODEL_MAP = {
-    "Free Router":        "openrouter/free",                         # auto-selects best free model
-    "Gemma 4 31B":        "google/gemma-4-31b-it:free",              # fast & free
-    "Llama 3.3 70B":      "meta-llama/llama-3.3-70b-instruct:free",  # large & capable
-}
-
-# Minimum cosine similarity score to consider a chunk "relevant" (0-1 space).
-# We still keep a floor, but retrieval now falls back to the highest-scoring
-# candidates instead of returning an empty context when the score distribution is
-# flatter than expected.
-MIN_RELEVANCE_SCORE = 0.28
 
 # ---------------------------------------------------------------------------
 # Grounding prompt (verbatim from spec.md §7)
@@ -266,11 +248,7 @@ def _get_collection():
 def _get_openai_client() -> OpenAI:
     global _openai_client
     if _openai_client is None:
-        api_key  = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
-        api_base = os.environ.get("OPENAI_API_BASE") or (
-            "https://openrouter.ai/api/v1" if os.environ.get("OPENROUTER_API_KEY") else "https://api.openai.com/v1"
-        )
-        _openai_client = OpenAI(api_key=api_key, base_url=api_base)
+        _openai_client = OpenAI(api_key=get_api_key(), base_url=get_api_base())
     return _openai_client
 
 
@@ -458,8 +436,9 @@ def _expand_query(question: str) -> str:
             # Use word-boundary match so "it" doesn't fire on "list", "activities", etc.
             if re.search(r'\b' + re.escape(key) + r'\b', q_lower):
                 return question + " " + expansion
-        # Also handle bare "IT" as a whole word separately (not caught above as dict key)
-        if re.search(r'\bit\b', q_lower):
+        # Handle bare "IT" — only if query has actual department context
+        if re.search(r'\bit\b', q_lower) and any(kw in q_lower for kw in
+            ["department", "faculty", "teacher", "professor", "hod", "branch", "staff"]):
             return question + " Information Technology IT faculty professor staff"
         return question + " faculty professor department BVRIT name designation"
     # Contact queries
@@ -472,7 +451,7 @@ def answer_question(
     question:       str,
     section_filter: Optional[str] = None,
     top_k:          int           = 8,
-    model:          str           = "DeepSeek R1",
+    model:          str           = "Free Router",
     history:        Optional[list[dict]] = None,
     session_id:     str           = "default",
     memory:         object        = None,
@@ -711,11 +690,10 @@ def get_collection_stats() -> dict:
     try:
         col = _get_collection()
         count = col.count()
-        # Sample to get section distribution
         sample = col.get(limit=500, include=["metadatas"])
         section_counts: dict[str, int] = {}
         for meta in sample.get("metadatas", []):
-            s = meta.get("section", "General")
+            s = meta.get("section_heading") or meta.get("section", "General")
             section_counts[s] = section_counts.get(s, 0) + 1
         return {
             "total_chunks": count,

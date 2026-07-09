@@ -52,6 +52,38 @@ CHROME_TAGS = ["header", "footer", "nav", "aside"]
 MIN_CONTENT_CHARS = 20
 BLOCK_TAGS = ["h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "table", "blockquote"]
 
+# URL priority scoring — higher = crawled first
+_HIGH_VALUE_PATTERNS = [
+    (r"(?i)faculty",         50),
+    (r"(?i)profile",         45),
+    (r"(?i)fee",             40),
+    (r"(?i)admission",       40),
+    (r"(?i)placement",       40),
+    (r"(?i)department",      35),
+    (r"(?i)about.*department", 35),
+    (r"(?i)contact",         30),
+    (r"(?i)principal",       30),
+    (r"(?i)lab",             25),
+    (r"(?i)library",         25),
+    (r"(?i)sport",           20),
+    (r"(?i)transport",       20),
+    (r"(?i)hostel",          20),
+    (r"(?i)scholarship",     20),
+    (r"(?i)research",        15),
+    (r"(?i)vision|mission",  15),
+    (r"(?i)about",           10),
+]
+
+_MAX_DEPTH = 3
+
+def url_priority(url: str) -> int:
+    """Score a URL by how likely it is to contain high-value content."""
+    score = 0
+    for pattern, pts in _HIGH_VALUE_PATTERNS:
+        if re.search(pattern, url):
+            score += pts
+    return score
+
 
 def is_same_domain(url: str, base_netloc: str) -> bool:
     return urlparse(url).netloc in ("", base_netloc)
@@ -195,24 +227,42 @@ def safe_filename(url: str) -> str:
 # Crawl
 # ---------------------------------------------------------------------------
 
-def crawl(seed_url: str, max_pages: int, delay: float, out_dir: Path):
+def crawl(seed_url: str, max_pages: int, delay: float, out_dir: Path, max_depth: int = _MAX_DEPTH):
     base_netloc = urlparse(seed_url).netloc
     pages_dir = out_dir / "pages"
     pages_dir.mkdir(parents=True, exist_ok=True)
 
     visited = set()
-    queue = deque([seed_url])
+    depth_map = {}  # url -> depth
+
+    # Queue entries: (url, depth, priority_score)
+    # We sort by depth first (breadth), then by priority (high-value first)
+    queue = [(seed_url, 0, url_priority(seed_url))]
     manifest_rows = []
     combined_parts = []
 
     session = requests.Session()
     session.headers.update(HEADERS)
 
+    def _pop_next():
+        """Pop the highest-priority URL at the shallowest available depth."""
+        if not queue:
+            return None
+        min_depth = min(q[1] for q in queue)
+        candidates = [q for q in queue if q[1] == min_depth]
+        candidates.sort(key=lambda x: x[2], reverse=True)
+        queue.remove(candidates[0])
+        return candidates[0]
+
     while queue and len(visited) < max_pages:
-        url = queue.popleft()
+        entry = _pop_next()
+        if entry is None:
+            break
+        url, depth, _ = entry
         if url in visited:
             continue
         visited.add(url)
+        depth_map[url] = depth
 
         try:
             resp = session.get(url, timeout=15)
@@ -228,7 +278,7 @@ def crawl(seed_url: str, max_pages: int, delay: float, out_dir: Path):
         title, body = extract_markdown(resp.text)
 
         if len(body) < MIN_CONTENT_CHARS:
-            print(f"[thin] {url} ({len(body)} chars)")
+            print(f"[thin] d{depth} {url} ({len(body)} chars)")
         else:
             fname = safe_filename(url)
             i = 1
@@ -245,13 +295,18 @@ def crawl(seed_url: str, max_pages: int, delay: float, out_dir: Path):
             combined_parts.append(
                 f"\n\n---\n\n# {title}\n\n> Source: {url} · Retrieved: {retrieved_at}\n\n{body}"
             )
-            print(f"[ok]   {url}  ({len(body)} chars)")
+            print(f"[ok] d{depth} {url}  ({len(body)} chars)")
 
-        soup = BeautifulSoup(resp.text, "html.parser")
-        for a in soup.find_all("a", href=True):
-            link = normalize_url(url, a["href"])
-            if link and is_same_domain(link, base_netloc) and link not in visited:
-                queue.append(link)
+        # Discover links — only follow if within depth limit
+        if depth < max_depth:
+            soup = BeautifulSoup(resp.text, "html.parser")
+            for a in soup.find_all("a", href=True):
+                link = normalize_url(url, a["href"])
+                if link and is_same_domain(link, base_netloc) and link not in visited:
+                    already = any(l == link for l, _, _ in queue)
+                    if not already:
+                        priority = url_priority(link)
+                        queue.append((link, depth + 1, priority))
 
         time.sleep(delay)
 
@@ -263,6 +318,7 @@ def crawl(seed_url: str, max_pages: int, delay: float, out_dir: Path):
         writer.writerows(manifest_rows)
 
     print(f"\nDone. Crawled {len(visited)} URLs, saved {len(manifest_rows)} pages with text.")
+    print(f"Depth distribution: { {d: sum(1 for v in depth_map.values() if v == d) for d in set(depth_map.values())} }")
     print(f"Output folder: {out_dir.resolve()}")
 
 
@@ -270,8 +326,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Crawl a website and extract structured Markdown for a RAG knowledge base.")
     parser.add_argument("url", help="Seed URL to start crawling from")
     parser.add_argument("--max-pages", type=int, default=200, help="Max number of pages to crawl")
-    parser.add_argument("--delay", type=float, default=0.5, help="Delay (seconds) between requests")
+    parser.add_argument("--max-depth", type=int, default=3, help="Maximum link depth from seed URL")
+    parser.add_argument("--delay", type=float, default=0.3, help="Delay (seconds) between requests")
     parser.add_argument("--out", type=str, default="scraped_site", help="Output directory")
     args = parser.parse_args()
 
-    crawl(args.url, args.max_pages, args.delay, Path(args.out))
+    crawl(args.url, args.max_pages, args.delay, Path(args.out), max_depth=args.max_depth)
