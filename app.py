@@ -413,12 +413,44 @@ with tab_eval:
         ]
         dim_select = st.selectbox("Run dimension", dim_options, index=0)
 
+    # Test case source controls
+    tc_col1, tc_col2 = st.columns([2, 1])
+    with tc_col1:
+        use_saved = st.checkbox(
+            "Use previously saved test cases",
+            value=False,
+            help="Unchecked = generate fresh test cases via LLM before running. "
+                 "Checked = reuse the last generated set saved in generated_test_cases.json.",
+        )
+    with tc_col2:
+        generate_n = st.number_input(
+            "Cases to generate",
+            min_value=8, max_value=40, value=16, step=4,
+            disabled=use_saved,
+            help="How many test cases the LLM generator should create (ignored when using saved cases).",
+        )
+
+    if not use_saved:
+        st.caption("🔄 Fresh test cases will be generated before this run.")
+    else:
+        import os as _os
+        saved_exists = _os.path.exists("generated_test_cases.json")
+        if saved_exists:
+            st.caption("📂 Using saved test cases from `generated_test_cases.json`.")
+        else:
+            st.caption("⚠️ No saved file found — will generate fresh cases automatically.")
+
     if run_btn:
         dim_filter = None if dim_select == "All" else dim_select[:2]
         with st.spinner("Running test suite… this may take 1–2 minutes."):
             try:
                 from eval import run_suite
-                report = run_suite(dim_filter=dim_filter, skip_ragas=skip_ragas)
+                report = run_suite(
+                    dim_filter = dim_filter,
+                    skip_ragas = skip_ragas,
+                    use_saved  = use_saved,
+                    generate_n = int(generate_n),
+                )
                 st.session_state.eval_report = report
             except Exception as e:
                 st.error(f"Evaluation failed: {e}")
@@ -430,6 +462,10 @@ with tab_eval:
     else:
         s        = report["summary"]
         pass_pct = int(s["pass_rate"] * 100)
+        tc_source = report.get("test_case_source", "static")
+        tc_count  = report.get("test_case_count", s["total"])
+        source_label = "📂 Saved cases" if tc_source == "saved" else "🔄 Generated cases"
+        st.caption(f"{source_label} · {tc_count} test cases run")
 
         st.markdown(
             f"""
