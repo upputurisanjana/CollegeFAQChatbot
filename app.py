@@ -444,8 +444,9 @@ with tab_eval:
         dim_filter = None if dim_select == "All" else dim_select[:2]
         with st.spinner("Running test suite… this may take 1–2 minutes."):
             try:
-                from eval import run_suite
-                report = run_suite(
+                import importlib, eval as _eval_mod
+                importlib.reload(_eval_mod)
+                report = _eval_mod.run_suite(
                     dim_filter = dim_filter,
                     skip_ragas = skip_ragas,
                     use_saved  = use_saved,
@@ -453,7 +454,9 @@ with tab_eval:
                 )
                 st.session_state.eval_report = report
             except Exception as e:
+                import traceback
                 st.error(f"Evaluation failed: {e}")
+                st.code(traceback.format_exc())
 
     report = st.session_state.get("eval_report")
 

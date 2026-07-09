@@ -378,8 +378,8 @@ Dimensions and guidance:
   06 Performance — any normal factual question (latency will be measured)
   07 Context     — multi-turn follow-up questions that reference a prior assistant message
 
-For dimension 07, include a "history" field:
-  "history": [{"role":"user","content":"..."}, {"role":"assistant","content":"..."}]
+For dimension 07, include a "history" field with prior conversation turns as a JSON array,
+for example: history containing role/content pairs for user and assistant turns.
 
 Return a JSON array of exactly {n} test cases. No markdown, no explanation — pure JSON array only.
 """
@@ -417,33 +417,69 @@ def generate_test_cases(n: int = 16) -> list[dict]:
         max_tokens=3000,
     )
 
+    if raw.startswith("[LLM_ERROR"):
+        print(f"  [WARNING] LLM generation failed: {raw}. Falling back to static TEST_CASES.")
+        return list(TEST_CASES)
+
     # Strip markdown code fences if present
-    raw = re.sub(r"^```(?:json)?\s*", "", raw.strip())
-    raw = re.sub(r"\s*```$", "", raw.strip())
+    cleaned = raw.strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    cleaned = cleaned.strip()
 
     try:
-        cases = json.loads(raw)
-        if not isinstance(cases, list) or len(cases) == 0:
-            raise ValueError("Generator returned empty or non-list")
+        parsed = json.loads(cleaned)
+
+        # LLM sometimes wraps the array in {"test_cases": [...]} or similar
+        if isinstance(parsed, dict):
+            # Try common wrapper keys
+            for key in ("test_cases", "cases", "questions", "items", "data"):
+                if key in parsed and isinstance(parsed[key], list):
+                    parsed = parsed[key]
+                    break
+            else:
+                # Fall back: take the first list value found
+                for v in parsed.values():
+                    if isinstance(v, list):
+                        parsed = v
+                        break
+                else:
+                    raise ValueError(f"Generator returned a dict with no list value: {list(parsed.keys())}")
+
+        if not isinstance(parsed, list) or len(parsed) == 0:
+            raise ValueError(f"Generator returned non-list or empty: {type(parsed)}")
 
         # Validate and patch required fields
-        required = {"id", "dim", "question", "expected_keywords", "must_refuse", "description"}
         valid = []
-        for i, tc in enumerate(cases):
+        for i, tc in enumerate(parsed):
             if not isinstance(tc, dict):
+                print(f"  [skip] case {i} is not a dict: {type(tc)}")
                 continue
-            missing = required - tc.keys()
-            if missing:
-                # Patch missing optional fields with safe defaults
-                tc.setdefault("expected_keywords", [])
-                tc.setdefault("must_refuse", False)
-                tc.setdefault("honest_refusal_ok", False)
-                tc.setdefault("description", "Generated test case")
-                tc.setdefault("history", [])
-                tc.setdefault("id", f"GEN-{i+1:02d}")
-                tc.setdefault("dim", "01")
-            if "question" not in tc or not tc["question"]:
+            # Patch missing optional fields with safe defaults
+            tc.setdefault("expected_keywords", [])
+            tc.setdefault("must_refuse", False)
+            tc.setdefault("honest_refusal_ok", False)
+            tc.setdefault("description", "Generated test case")
+            tc.setdefault("history", [])
+            tc.setdefault("forbidden_keywords", [])
+            tc.setdefault("latency_check", False)
+            if "id" not in tc:
+                tc["id"] = f"GEN-{i+1:02d}"
+            if "dim" not in tc:
+                tc["dim"] = "01"
+            if "question" not in tc or not str(tc.get("question", "")).strip():
+                print(f"  [skip] case {i} has no question")
                 continue
+            # Ensure expected_keywords is a list of strings
+            if not isinstance(tc["expected_keywords"], list):
+                tc["expected_keywords"] = []
+            # Ensure history is a list of proper dicts
+            if not isinstance(tc.get("history"), list):
+                tc["history"] = []
+            tc["history"] = [
+                h for h in tc["history"]
+                if isinstance(h, dict) and "role" in h and "content" in h
+            ]
             valid.append(tc)
 
         if len(valid) == 0:
@@ -457,7 +493,7 @@ def generate_test_cases(n: int = 16) -> list[dict]:
 
     except Exception as e:
         print(f"  [WARNING] Test case generation failed: {e}. Falling back to static TEST_CASES.")
-        return TEST_CASES
+        return list(TEST_CASES)
 
 
 def load_saved_test_cases() -> list[dict]:
